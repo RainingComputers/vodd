@@ -1,0 +1,9 @@
+[package]
+name = "vodd"
+version = "0.1.0"
+edition = "2024"
+authors = ["RainingComputers <vishnu.vish.shankar@gmail.com>"]
+
+
+[lib]
+crate-type = ["cdylib"]
