@@ -6,4 +6,7 @@ authors = ["RainingComputers <vishnu.vish.shankar@gmail.com>"]
 
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[dev-dependencies]
+yaml-rust2 = "0.10"

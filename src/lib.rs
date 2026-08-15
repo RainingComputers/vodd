@@ -7,6 +7,8 @@
 pub mod consts;
 pub mod device;
 pub mod ffi;
+pub mod interpreter;
+pub mod spirv;
 
 unsafe fn info_bytes(
     src: &[u8],

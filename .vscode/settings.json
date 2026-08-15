@@ -1,3 +1,13 @@
 {
-    "cSpell.words": ["bitfield", "errcode", "memobj", "nonoverlapping", "spirv", "unioned", "VODD"]
+    "cSpell.words": [
+        "bitfield",
+        "errcode",
+        "memobj",
+        "nonoverlapping",
+        "pointee",
+        "spirv",
+        "unioned",
+        "VODD",
+        "Workgroups"
+    ]
 }
