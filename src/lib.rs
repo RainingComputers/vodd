@@ -4,11 +4,13 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::too_many_arguments)]
 
+pub mod bitcode;
 pub mod consts;
 pub mod device;
 pub mod ffi;
 pub mod interpreter;
-pub mod spirv;
+pub mod parser;
+pub mod value;
 
 unsafe fn info_bytes(
     src: &[u8],

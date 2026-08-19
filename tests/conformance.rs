@@ -3,10 +3,12 @@ use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
 
+use vodd::bitcode;
 use vodd::interpreter;
-use vodd::spirv;
+use vodd::parser;
 
 const SLACK: usize = 4096;
+const FUEL: usize = 1 << 24;
 
 const REFERENCE_DEFECTS: &[(&str, &str)] = &[
     (
@@ -84,80 +86,81 @@ fn assemble(assembly: &str) -> Vec<u8> {
     output.stdout
 }
 
-struct CorpusHost {
-    buffers: Vec<(u64, Vec<u8>)>,
+type Buffers = Vec<(u64, Vec<u8>)>;
+
+fn locate(buffers: &Buffers, address: u64, length: usize) -> Result<(usize, usize), String> {
+    for (index, (base, bytes)) in buffers.iter().enumerate() {
+        if address >= *base && address + length as u64 <= *base + bytes.len() as u64 {
+            return Ok((index, (address - *base) as usize));
+        }
+    }
+
+    Err(format!("address {address:#x} is not inside any buffer"))
+}
+
+fn read(buffers: &Buffers, address: u64, size: usize) -> Result<Vec<u8>, String> {
+    let (index, offset) = locate(buffers, address, size)?;
+
+    Ok(buffers[index].1[offset..offset + size].to_vec())
+}
+
+fn write(buffers: &mut Buffers, address: u64, bytes: &[u8]) -> Result<(), String> {
+    let (index, offset) = locate(buffers, address, bytes.len())?;
+    buffers[index].1[offset..offset + bytes.len()].copy_from_slice(bytes);
+
+    Ok(())
+}
+
+fn driver(
+    interpreter: &mut interpreter::Interpreter,
+    buffers: &mut Buffers,
     global_id: [u64; 3],
-}
+) -> Result<(), String> {
+    let mut reply = interpreter::Resume::Start;
 
-impl CorpusHost {
-    fn locate(&mut self, address: u64, length: usize) -> Option<(usize, usize)> {
-        for (index, (base, bytes)) in self.buffers.iter().enumerate() {
-            if address >= *base && address + length as u64 <= *base + bytes.len() as u64 {
-                return Some((index, (address - *base) as usize));
-            }
-        }
-        None
-    }
-}
-
-impl interpreter::Host for CorpusHost {
-    fn read(&mut self, address: u64, destination: &mut [u8]) -> Result<(), interpreter::HostError> {
-        let (index, offset) = self
-            .locate(address, destination.len())
-            .ok_or(interpreter::HostError::OutOfBounds)?;
-        destination.copy_from_slice(&self.buffers[index].1[offset..offset + destination.len()]);
-        Ok(())
-    }
-
-    fn write(&mut self, address: u64, source: &[u8]) -> Result<(), interpreter::HostError> {
-        let (index, offset) = self
-            .locate(address, source.len())
-            .ok_or(interpreter::HostError::OutOfBounds)?;
-        self.buffers[index].1[offset..offset + source.len()].copy_from_slice(source);
-        Ok(())
-    }
-
-    fn read_local(
-        &mut self,
-        address: u64,
-        destination: &mut [u8],
-    ) -> Result<(), interpreter::HostError> {
-        self.read(address, destination)
-    }
-
-    fn write_local(&mut self, address: u64, source: &[u8]) -> Result<(), interpreter::HostError> {
-        self.write(address, source)
-    }
-
-    fn atomic(
-        &mut self,
-        operation: interpreter::Atomic,
-        address: u64,
-        width: u32,
-    ) -> Result<u64, interpreter::HostError> {
-        let size = (width as usize).div_ceil(8);
-        let mut current = vec![0u8; size];
-        self.read(address, &mut current)?;
-        let mut buffer = [0u8; 8];
-        buffer[..size].copy_from_slice(&current);
-        let previous = u64::from_le_bytes(buffer);
-        let updated = match operation {
-            interpreter::Atomic::Increment => previous.wrapping_add(1),
-            interpreter::Atomic::Decrement => previous.wrapping_sub(1),
+    loop {
+        let Some(reason) = interpreter
+            .resume(reply)
+            .map_err(|error| format!("{error:?}"))?
+        else {
+            return Ok(());
         };
-        self.write(address, &updated.to_le_bytes()[..size])?;
-        Ok(previous)
-    }
 
-    fn memory_barrier(&mut self, _semantics: u32) {}
+        reply = match reason {
+            interpreter::YieldReason::Read { address, size }
+            | interpreter::YieldReason::ReadLocal { address, size } => {
+                interpreter::Resume::Bytes(read(buffers, address, size)?)
+            }
+            interpreter::YieldReason::Write { address, bytes }
+            | interpreter::YieldReason::WriteLocal { address, bytes } => {
+                write(buffers, address, &bytes)?;
+                interpreter::Resume::Ack
+            }
+            interpreter::YieldReason::Atomic { operation, address, width } => {
+                let size = (width as usize).div_ceil(8);
+                let mut buffer = [0u8; 8];
+                buffer[..size].copy_from_slice(&read(buffers, address, size)?);
 
-    fn builtin(&mut self, builtin: spirv::Builtin) -> [u64; 3] {
-        match builtin {
-            spirv::Builtin::GlobalInvocationId => self.global_id,
-            spirv::Builtin::NumWorkgroups => [1, 1, 1],
-            spirv::Builtin::WorkgroupSize => [1, 1, 1],
-            _ => [0, 0, 0],
-        }
+                let previous = u64::from_le_bytes(buffer);
+                let updated = match operation {
+                    interpreter::Atomic::Increment => previous.wrapping_add(1),
+                    interpreter::Atomic::Decrement => previous.wrapping_sub(1),
+                };
+
+                write(buffers, address, &updated.to_le_bytes()[..size])?;
+                interpreter::Resume::Scalar(previous)
+            }
+            interpreter::YieldReason::Builtin(builtin) => {
+                interpreter::Resume::Builtin(match builtin {
+                    bitcode::Builtin::GlobalInvocationId => global_id,
+                    bitcode::Builtin::NumWorkgroups => [1, 1, 1],
+                    bitcode::Builtin::WorkgroupSize => [1, 1, 1],
+                    _ => [0, 0, 0],
+                })
+            }
+            interpreter::YieldReason::MemoryBarrier { .. }
+            | interpreter::YieldReason::ControlBarrier { .. } => interpreter::Resume::Ack,
+        };
     }
 }
 
@@ -193,10 +196,7 @@ fn load_corpus() -> Vec<Case> {
             } else {
                 argument["value"].as_str().expect("value")
             };
-            arguments.push(CaseArgument {
-                kind,
-                bytes: decode_base85(encoded),
-            });
+            arguments.push(CaseArgument { kind, bytes: decode_base85(encoded) });
         }
         cases.push(Case {
             module: entry["module"].as_str().expect("module").to_string(),
@@ -204,7 +204,10 @@ fn load_corpus() -> Vec<Case> {
             global_work_size: entry["global_work_size"].as_i64().expect("size") as usize,
             out_arg: entry["out_arg"].as_i64().expect("out_arg") as usize,
             compare: entry["compare"].as_str().expect("compare").to_string(),
-            assembly: entry["spirv_assembly"].as_str().expect("assembly").to_string(),
+            assembly: entry["spirv_assembly"]
+                .as_str()
+                .expect("assembly")
+                .to_string(),
             expected: decode_base85(entry["expected"].as_str().expect("expected")),
             arguments,
         });
@@ -214,18 +217,13 @@ fn load_corpus() -> Vec<Case> {
 
 fn run_case(case: &Case) -> Result<Vec<u8>, String> {
     let binary = assemble(&case.assembly);
-    let module = spirv::parse_bytes(&binary).map_err(|error| format!("parse: {error:?}"))?;
-    let program =
-        interpreter::Program::new(module).map_err(|error| format!("program: {error:?}"))?;
-    let function = program
-        .module
-        .entry_index(&case.entry)
-        .map_err(|error| format!("entry: {error:?}"))?;
+    let module = parser::parse(&binary).map_err(|error| format!("parse: {error:?}"))?;
+    let function = module
+        .entry(&case.entry)
+        .map_err(|error| format!("entry: {error:?}"))?
+        .result;
 
-    let mut host = CorpusHost {
-        buffers: Vec::new(),
-        global_id: [0, 0, 0],
-    };
+    let mut buffers: Buffers = Vec::new();
     let mut arguments = Vec::new();
     let mut next_base = 0x1000u64;
     for argument in &case.arguments {
@@ -234,7 +232,7 @@ fn run_case(case: &Case) -> Result<Vec<u8>, String> {
             let mut backing = argument.bytes.clone();
             backing.resize(argument.bytes.len() + SLACK, 0);
             next_base += (backing.len() as u64 + 0x1000) & !0xFFF;
-            host.buffers.push((base, backing));
+            buffers.push((base, backing));
             arguments.push(interpreter::Argument::Buffer(base));
         } else {
             arguments.push(interpreter::Argument::Value(argument.bytes.clone()));
@@ -242,12 +240,12 @@ fn run_case(case: &Case) -> Result<Vec<u8>, String> {
     }
 
     for id in 0..case.global_work_size {
-        host.global_id = [id as u64, 0, 0];
-        let mut invocation = interpreter::Invocation::new(&program, function, &arguments)
-            .map_err(|error| format!("invocation: {error:?}"))?;
-        invocation
-            .run(&program, &mut host)
-            .map_err(|error| format!("work item {id}: {error:?}"))?;
+        let mut interpreter =
+            interpreter::Interpreter::new(module.clone(), function, &arguments, FUEL)
+                .map_err(|error| format!("invocation: {error:?}"))?;
+
+        driver(&mut interpreter, &mut buffers, [id as u64, 0, 0])
+            .map_err(|error| format!("work item {id}: {error}"))?;
     }
 
     let mut buffer_index = 0;
@@ -256,7 +254,7 @@ fn run_case(case: &Case) -> Result<Vec<u8>, String> {
             continue;
         }
         if index == case.out_arg {
-            let produced = &host.buffers[buffer_index].1;
+            let produced = &buffers[buffer_index].1;
             return Ok(produced[..produced.len() - SLACK].to_vec());
         }
         buffer_index += 1;
@@ -384,4 +382,57 @@ fn corpus() {
         println!("  FAIL {module}: {reason}");
     }
     assert!(failed.is_empty(), "{} cases failed", failed.len());
+}
+
+#[test]
+fn barriers_reach_the_driver() {
+    let case = load_corpus()
+        .into_iter()
+        .find(|case| case.module == "memory_barrier")
+        .expect("the corpus must contain the memory_barrier case");
+
+    let binary = assemble(&case.assembly);
+    let module = parser::parse(&binary).expect("parse");
+    let function = module.entry(&case.entry).expect("entry").result;
+
+    let arguments = [
+        interpreter::Argument::Buffer(0x1000),
+        interpreter::Argument::Buffer(0x2000),
+    ];
+    let mut interpreter =
+        interpreter::Interpreter::new(module, function, &arguments, FUEL).expect("invocation");
+
+    let mut buffers: Buffers = vec![
+        (0x1000, vec![0; 1024]),
+        (0x2000, case.arguments[1].bytes.clone()),
+    ];
+    let mut barriers = Vec::new();
+    let mut reply = interpreter::Resume::Start;
+
+    while let Some(reason) = interpreter.resume(reply).expect("resume") {
+        reply = match reason {
+            interpreter::YieldReason::MemoryBarrier { .. }
+            | interpreter::YieldReason::ControlBarrier { .. } => {
+                barriers.push(reason);
+                interpreter::Resume::Ack
+            }
+            interpreter::YieldReason::Read { address, size } => {
+                interpreter::Resume::Bytes(read(&buffers, address, size).expect("read"))
+            }
+            interpreter::YieldReason::Write { address, bytes } => {
+                write(&mut buffers, address, &bytes).expect("write");
+                interpreter::Resume::Ack
+            }
+            interpreter::YieldReason::Builtin(_) => interpreter::Resume::Builtin([7, 0, 0]),
+            other => panic!("unexpected yield {other:?}"),
+        };
+    }
+
+    assert_eq!(
+        barriers,
+        vec![
+            interpreter::YieldReason::MemoryBarrier { semantics: 528 },
+            interpreter::YieldReason::ControlBarrier { execution_scope: 2, semantics: 272 },
+        ]
+    );
 }

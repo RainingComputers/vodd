@@ -3,7 +3,6 @@ use crate::ffi;
 
 static VODD_PLATFORM_TOKEN: u8 = 0xA0;
 static VODD_DEVICE_TOKEN: u8 = 0xD0;
-
 const VODD_DEVICE_TYPE: ffi::cl_device_type = consts::CL_DEVICE_TYPE_GPU;
 
 pub enum InfoValue {

@@ -1,11 +1,17 @@
 {
     "cSpell.words": [
+        "bitcode",
         "bitfield",
+        "CACHELINE",
+        "componentwise",
         "errcode",
         "memobj",
         "nonoverlapping",
         "pointee",
+        "signedness",
+        "signum",
         "spirv",
+        "trunc",
         "unioned",
         "VODD",
         "Workgroups"

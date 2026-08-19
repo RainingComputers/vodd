@@ -13,7 +13,7 @@ metadata:
   encoding: base85 (as produced by Python base64.b85encode)
   global_work_size: 256
   counts:
-    cases: 130
+    cases: 131
     skipped: 6
   skipped:
   - module: linkage_export
@@ -9662,6 +9662,120 @@ cases:
     U*4O{Qn#$7pZQ^hzMcs`LKSZB>fLRLNhUIkYM)b3lA1`jBcdSvs$(l*yq?W<wq~SH12v#V@%-pV6drQAr38#9H!9(r-f0GC>
     $)dRWy(vM9`iH)z`<MFkNnvL?ZE3tTr#$To!KJc=aVL*G<1hRI}*w9oKP705@QM-MXc^a_zCKq6ARV_s*h`1u>v=j;kf;+sz
     lcl$<Ybp$k-%*fHP)Lz@SCM{Gha^9>nJ
+- module: memory_barrier
+  note: authored for vodd; the CTS spirv_new suite contains no OpMemoryBarrier or OpControlBarrier case
+  reference:
+    platform: rusticl
+    device: llvmpipe (LLVM 19.1.7, 128 bits)
+    driver: 25.0.7-2+deb13u1
+    il_version: SPIR-V_1.0 SPIR-V_1.1 SPIR-V_1.2 SPIR-V_1.3 SPIR-V_1.4
+    note: expected bytes computed by this implementation, not by vodd
+  entry: memory_barrier
+  global_work_size: 256
+  out_arg: 0
+  compare: exact
+  args:
+  - index: 0
+    kind: buffer
+    elem: u32
+    bytes: 4
+    role: out
+    count: 256
+    data: |
+      000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+      000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+      000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+      000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+      000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+      000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+      000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+      000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+      000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+      000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+      000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+      000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+      000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+      00000000000000000000000000000000
+  - index: 1
+    kind: buffer
+    elem: u32
+    bytes: 4
+    role: in
+    count: 256
+    data: |
+      00000v3WP1V)Jf16K$s2#OB?2bzl`2CfZE3*HeU3h|Rn4IY;x4>cA>4n>u35OthJ5{VmZ5uBQm6Um-w65Sw@7!4$87a*pO7B
+      M2V8)PYr8h5L;9Hg&|9=kEJ9m}oQAN#bgA`dgwAtJT@BTu%{B4arFCzCwVCZ@jlCAU5yD(XS?Df+=1DGozKE<Q&aEm6inFMi
+      4xF_la{Fr~|9GS$*PG3ilcHyKqsHZ0d+H9b~}I&fWKIe^)OIFwthJ;YyxJlEl^KLp}|K^tVJKr7?WLR;#mL2PNzMxSk@MX&7
+      2M8j_LN%L~bNe1!lNE&n&O-gs|OkMgGPKy2QP@#PgPqF+tQQ`v-Q1XH{QwaoLRW=1PR7r<iS$T^ySd9%?SDlG}T+onKTj39X
+      UJ({nU?i1%UpN$^VPzP3V0fCJVviiiWV|4sW6z((X#b;}XcHyEXCtKRY*whhYiB3rYI>>;Z>p{3ZoV)MaO*JQa{;pmauPBzb
+      V4}@b5gY~c!j(Lca}RVcB#Eod)dJ&dhI|?dH}+Ae=x>Qend!jfN@Mtf``j-ftX5~gUC^Fg4ocShzrziha6LshA-8<i(lE4ig
+      R1KiG$bRj<(*njmKT!kN0G^k_zD3ksf0MlTK;cl3wWmlyz$<mZEF@m9_3Bn&t8RnfY`hnF;euo;>#;olSO0pM8BGp^*GWprm
+      _jqS1dtq2&Q-qxgW5rYMJLr8xtSs%#2oseFlysE`Y_t-}(GtkaINuLG5du@@Atuqu|=vR9X^v1=L9vwoQSwXUDiw7(wvx$+{
+      <xdNf}xE3THy+$YXyjiChyJ{vuz@04^zpbo6!QHbM!0s<Q!vwKp#Wc7(#6>q`$#_0H$cVaL$DBNe%*;Su%iqF;%J4p_&?7~G
+      &ojiT(PPVj(|1az(u&E=)VIx~)5}lF)!xqY*bdUi*B?>v+)`M_+hyAA+ICtN->F^d-nrcq;OXP);{9U~;t=II<UQsM<56fc<
+      z(kv=alX<=A~*`>)3HH>ge!R>HKnk?<{s!?mzW>@ND^0@`HPM@ss+Z^TYvp^4EZz^y>e`_ZtSB_A7<O`(BBe`fmuo`GSh*{<
+      4n0{l*aG{ML;N|_PJj|r!$w}Sgp=}2`2^}x}ZI~YZ`S~9F(m0%?;$0euo=0F9B21;ChO1k@Ue1LT>r2^XD*2q+w|3RokD323
+      6N3x6Tg4Xh=q48Nz)4$~(25d$sI5EH5P6-Kbl6jv|v6Kb*?7@D&17p^rK8QVDU81B0k8wEW-9Wp)>97Vu69$7zPAc;mfADP8
+      sB+SV+Bi%?`BJj$EC?L*UCp1lhDPd7rD
+  spirv_assembly: |
+    ; SPIR-V
+    ; Version: 1.0
+    ; Generator: hand-written for vodd; 0
+    ; Bound: 30
+    ; Schema: 0
+                   OpCapability Addresses
+                   OpCapability Linkage
+                   OpCapability Kernel
+                   OpCapability Int64
+                   OpMemoryModel Physical64 OpenCL
+                   OpEntryPoint Kernel %kernel "memory_barrier" %gl_GlobalInvocationID
+                   OpDecorate %gl_GlobalInvocationID BuiltIn GlobalInvocationId
+                   OpDecorate %gl_GlobalInvocationID Constant
+                   OpDecorate %gl_GlobalInvocationID LinkageAttributes "__spirv_BuiltInGlobalInvocationId" Import
+          %ulong = OpTypeInt 64 0
+           %uint = OpTypeInt 32 0
+        %v3ulong = OpTypeVector %ulong 3
+    %_ptr_Input_v3ulong = OpTypePointer Input %v3ulong
+           %void = OpTypeVoid
+    %_ptr_CrossWorkgroup_uint = OpTypePointer CrossWorkgroup %uint
+              %9 = OpTypeFunction %void %_ptr_CrossWorkgroup_uint %_ptr_CrossWorkgroup_uint
+         %uint_2 = OpConstant %uint 2
+       %uint_528 = OpConstant %uint 528
+       %uint_272 = OpConstant %uint 272
+    %gl_GlobalInvocationID = OpVariable %_ptr_Input_v3ulong Input
+         %kernel = OpFunction %void None %9
+            %out = OpFunctionParameter %_ptr_CrossWorkgroup_uint
+          %input = OpFunctionParameter %_ptr_CrossWorkgroup_uint
+          %entry = OpLabel
+           %gid3 = OpLoad %v3ulong %gl_GlobalInvocationID Aligned 32
+            %gid = OpCompositeExtract %ulong %gid3 0
+       %in_ptr = OpInBoundsPtrAccessChain %_ptr_CrossWorkgroup_uint %input %gid
+          %value = OpLoad %uint %in_ptr Aligned 4
+        %out_ptr = OpInBoundsPtrAccessChain %_ptr_CrossWorkgroup_uint %out %gid
+                   OpStore %out_ptr %value Aligned 4
+                   OpMemoryBarrier %uint_2 %uint_528
+        %written = OpLoad %uint %out_ptr Aligned 4
+            %sum = OpIAdd %uint %written %value
+                   OpStore %out_ptr %sum Aligned 4
+                   OpControlBarrier %uint_2 %uint_2 %uint_272
+                   OpReturn
+                   OpFunctionEnd
+  spirv_sha256: 612f3e18a311e2b6f1572d240e3848d558e407e74d966b2ee3e1c28c34fe979a
+  expected: |
+    00000V)Jf1#OB?2CfZE3h|Rn4>cA>4OthJ5uBQm65Sw@7a*pO7)PYr8Hg&|9m}oQA`dgwATu%{BzCwVCAU5yDf+=1D<Q&aEM
+    i4xFr~|9G3ilcHZ0d+H&fWKIFwthJlEl^K^tVJKR;#mLxSk@M8j_LNe1!lN-gs|OKy2QPqF+tQ1XH{QW=1PR$T^ySDlG}Tj3
+    9XU?i1%UPzP3VviiiW6z((XcHyEX*whhYI>>;ZoV)Ma{;pmaV4}@b!j(LcB#EodhI|?d=x>QeN@MtftX5~g4ocSha6Lsh(lE
+    4iG$bRjmKT!k_zD3kTK;clyz$<m9_3BnfY`hn;>#;oM8BGprm_jq2&Q-qYMJLr%#2osE`Y_tkaINu@@AtuR9X^vwoQSw7(wv
+    xdNf}x+$YXyJ{vuzpbo6!0s<Q!Wc7(##_0H$DBNe%iqF;%?7~G&PPVj(u&E=)5}lF)bdUi*)`M_+ICtN-nrcq;{9U~;UQsM<
+    z(kv=A~*`>ge!R><{s!?ND^0@ss+Z^4EZz^ZtSB_(BBe`GSh*{l*aG{_PJj|Sgp=}x}ZI~9F(m0euo=0;ChO1LT>r2q+w|32
+    36N3Xh=q4$~(25EH5P6jv|v6@D&17QVDU8wEW-97Vu69c;mfA+SV+BJj$ECp1lhD0I_*DVx;JE#FtmFCX2@Gh<-IG>T#rHOl
+    1?Iu2_QJ5KQqJaz9{K)H2VLHYPsMm>I1M`V1UNTmXxOzVrFPAm?cQg4)+Q<jqERM!~hSsI(;T3aFDTY?}gU&W>@VFoNLWl66
+    lW^k}|XR$MKYxKEtZ8bb>Zd^UPa-YMybKpj}cq7cUc1OzrdX7{9e$m$cfD&B(gjM4Eg?!;hhP`J;iva3Gj6rZgjc9I-k*oBL
+    lI(homoNQ?m{$JQnU{gno!bY~pBswJphAosq=pX}rN)&RstOw!t4*O3taPGcu(%~(vG}WBwmdFbw_`7;xTCeGyyrNjz9+t-z
+    fQdF!;(Vo#L~s<$relK$2v_n%YD!^&%stS(E-^p)kR+})@)sR*R11u+w*LC-81iW-dga(;+}KB<KFqe=puZ&=0<)A>WTpd?#
+    +h=@D2?F@ihxi^>~p__PG>H`uv(q{5>5;{bU}M|)->v}I4D`~nj6R~{0=v0UIM11!1Wa2BI$!2gxvC3=Fef4NW;+5s<uB546
+    3e6Zk-*7(2$J8GKBj8ly_=9_G;OASYAlBx>2|C97QHCemIqD;41{ELLYPFq!QvF1_n`GX!*aH%Iq%IEa06Ij?)ZJ@Wy+KQo8
+    ELw5?eL7NN*Mc$7DN+J~mOJbM-Po^FIP
 - module: op_function_const
   cts: test_conformance/spirv_new/spirv_asm/op_function_const.spvasm64
   entry: op_function_const
