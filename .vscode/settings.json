@@ -10,6 +10,7 @@
         "pointee",
         "signedness",
         "signum",
+        "SPIR",
         "spirv",
         "trunc",
         "unioned",

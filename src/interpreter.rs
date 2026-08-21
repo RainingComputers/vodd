@@ -136,7 +136,7 @@ impl Frame {
 
 #[derive(Debug, Clone)]
 pub struct Interpreter {
-    pub module: bitcode::Module,
+    module: bitcode::Module,
     module_storage: Vec<u8>,
     module_offsets: Vec<Option<usize>>,
     frames: Vec<Frame>,
