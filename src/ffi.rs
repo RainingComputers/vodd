@@ -21,6 +21,12 @@ pub type cl_channel_type = cl_uint;
 pub type cl_command_queue_info = cl_uint;
 pub type cl_command_type = cl_uint;
 pub type cl_context_info = cl_uint;
+pub type cl_context_callback = unsafe extern "C" fn(
+    errinfo: *const core::ffi::c_char,
+    private_info: *const core::ffi::c_void,
+    cb: usize,
+    user_data: *mut core::ffi::c_void,
+);
 pub type cl_device_info = cl_uint;
 pub type cl_device_local_mem_type = cl_uint;
 pub type cl_device_mem_cache_type = cl_uint;

@@ -6,6 +6,9 @@ pub const CL_INVALID_VALUE: ffi::cl_int = -30;
 pub const CL_INVALID_DEVICE_TYPE: ffi::cl_int = -31;
 pub const CL_INVALID_PLATFORM: ffi::cl_int = -32;
 pub const CL_INVALID_DEVICE: ffi::cl_int = -33;
+pub const CL_INVALID_CONTEXT: ffi::cl_int = -34;
+pub const CL_INVALID_PROPERTY: ffi::cl_int = -64;
+pub const CL_OUT_OF_HOST_MEMORY: ffi::cl_int = -6;
 
 pub const CL_FALSE: ffi::cl_bool = 0;
 pub const CL_TRUE: ffi::cl_bool = 1;
@@ -20,6 +23,14 @@ pub const CL_DEVICE_TYPE_GPU: ffi::cl_device_type = 1 << 2;
 pub const CL_DEVICE_TYPE_ACCELERATOR: ffi::cl_device_type = 1 << 3;
 pub const CL_DEVICE_TYPE_CUSTOM: ffi::cl_device_type = 1 << 4;
 pub const CL_DEVICE_TYPE_ALL: ffi::cl_device_type = 0xFFFF_FFFF;
+
+pub const CL_CONTEXT_REFERENCE_COUNT: ffi::cl_context_info = 0x1080;
+pub const CL_CONTEXT_DEVICES: ffi::cl_context_info = 0x1081;
+pub const CL_CONTEXT_PROPERTIES: ffi::cl_context_info = 0x1082;
+pub const CL_CONTEXT_NUM_DEVICES: ffi::cl_context_info = 0x1083;
+
+pub const CL_CONTEXT_PLATFORM: ffi::cl_context_properties = 0x1084;
+pub const CL_CONTEXT_INTEROP_USER_SYNC: ffi::cl_context_properties = 0x1085;
 
 pub const CL_PLATFORM_PROFILE: ffi::cl_platform_info = 0x0900;
 pub const CL_PLATFORM_VERSION: ffi::cl_platform_info = 0x0901;

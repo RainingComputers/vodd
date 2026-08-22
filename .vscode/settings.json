@@ -6,6 +6,7 @@
         "CACHELINE",
         "componentwise",
         "errcode",
+        "errinfo",
         "memobj",
         "nonoverlapping",
         "pocl",
@@ -16,7 +17,10 @@
         "spirv",
         "trunc",
         "unioned",
+        "userevents",
         "VODD",
+        "waitlist",
+        "waitlists",
         "Workgroups"
     ]
 }

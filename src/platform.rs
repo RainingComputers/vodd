@@ -4,20 +4,22 @@ use crate::ffi;
 static VODD_PLATFORM_TOKEN: u8 = 0xA0;
 static VODD_DEVICE_TOKEN: u8 = 0xD0;
 const VODD_DEVICE_TYPE: ffi::cl_device_type = consts::CL_DEVICE_TYPE_GPU;
+const VODD_CONTEXT_MAGIC: u32 = 0xC0FF_EEC7;
 
-pub enum InfoValue {
+pub enum InfoValue<'a> {
     Uint(ffi::cl_uint),
     Ulong(ffi::cl_ulong),
     Size(usize),
-    Sizes(&'static [usize]),
+    Sizes(&'a [usize]),
     Handle(*mut core::ffi::c_void),
-    Text(&'static [u8]),
-    Properties(&'static [ffi::cl_device_partition_property]),
+    Handles(&'a [ffi::cl_device_id]),
+    Text(&'a [u8]),
+    Properties(&'a [ffi::cl_device_partition_property]),
 }
 
-pub struct VoddDevice {}
+pub struct VoddPlatform {}
 
-impl VoddDevice {
+impl VoddPlatform {
     pub fn platform_id() -> ffi::cl_platform_id {
         &raw const VODD_PLATFORM_TOKEN as *mut ffi::_cl_platform_id
     }
@@ -57,7 +59,7 @@ impl VoddDevice {
         Some(text)
     }
 
-    pub fn device_info(param_name: ffi::cl_device_info) -> Option<InfoValue> {
+    pub fn device_info(param_name: ffi::cl_device_info) -> Option<InfoValue<'static>> {
         let value = match param_name {
             consts::CL_DEVICE_TYPE => InfoValue::Ulong(VODD_DEVICE_TYPE),
             consts::CL_DEVICE_VENDOR_ID => InfoValue::Uint(0),
@@ -140,5 +142,140 @@ impl VoddDevice {
         };
 
         Some(value)
+    }
+}
+
+unsafe impl Send for VoddContext {}
+unsafe impl Sync for VoddContext {}
+
+pub struct VoddContext {
+    magic: u32,
+    reference_count: core::sync::atomic::AtomicU32,
+    devices: Vec<ffi::cl_device_id>,
+    properties: Vec<ffi::cl_context_properties>,
+    notify: Option<ffi::cl_context_callback>,
+    user_data: *mut core::ffi::c_void,
+}
+
+impl VoddContext {
+    pub fn new(
+        properties: Vec<ffi::cl_context_properties>,
+        devices: Vec<ffi::cl_device_id>,
+        notify: Option<ffi::cl_context_callback>,
+        user_data: *mut core::ffi::c_void,
+    ) -> Self {
+        Self {
+            magic: VODD_CONTEXT_MAGIC,
+            reference_count: core::sync::atomic::AtomicU32::new(1),
+            devices,
+            properties,
+            notify,
+            user_data,
+        }
+    }
+
+    pub fn is_context(&self) -> bool {
+        self.magic == VODD_CONTEXT_MAGIC
+    }
+
+    pub fn retain(&self) {
+        self.reference_count
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn release(&self) -> bool {
+        self.reference_count
+            .fetch_sub(1, core::sync::atomic::Ordering::AcqRel)
+            == 1
+    }
+
+    pub fn info(&self, param_name: ffi::cl_context_info) -> Option<InfoValue<'_>> {
+        match param_name {
+            consts::CL_CONTEXT_REFERENCE_COUNT => Some(InfoValue::Uint(
+                self.reference_count
+                    .load(core::sync::atomic::Ordering::Relaxed),
+            )),
+            consts::CL_CONTEXT_NUM_DEVICES => {
+                Some(InfoValue::Uint(self.devices.len() as ffi::cl_uint))
+            }
+            consts::CL_CONTEXT_DEVICES => Some(InfoValue::Handles(&self.devices)),
+            consts::CL_CONTEXT_PROPERTIES => Some(InfoValue::Properties(&self.properties)),
+            _ => None,
+        }
+    }
+
+    pub fn validate_properties(
+        properties: &[ffi::cl_context_properties],
+    ) -> Result<(), ffi::cl_int> {
+        let listed = properties.strip_suffix(&[0]).unwrap_or(properties);
+        let mut pairs = listed.chunks_exact(2);
+        if !pairs.remainder().is_empty() {
+            return Err(consts::CL_INVALID_PROPERTY);
+        }
+
+        let named: Vec<ffi::cl_context_properties> = pairs.clone().map(|pair| pair[0]).collect();
+        if named
+            .iter()
+            .enumerate()
+            .any(|(index, name)| named[..index].contains(name))
+        {
+            return Err(consts::CL_INVALID_PROPERTY);
+        }
+
+        pairs.try_for_each(|pair| Self::validate_property(pair[0], pair[1]))
+    }
+
+    fn validate_property(
+        name: ffi::cl_context_properties,
+        value: ffi::cl_context_properties,
+    ) -> Result<(), ffi::cl_int> {
+        match name {
+            consts::CL_CONTEXT_PLATFORM => {
+                VoddPlatform::is_platform_id(value as ffi::cl_platform_id)
+                    .then_some(())
+                    .ok_or(consts::CL_INVALID_PLATFORM)
+            }
+            consts::CL_CONTEXT_INTEROP_USER_SYNC => {
+                matches!(value as ffi::cl_bool, consts::CL_FALSE | consts::CL_TRUE)
+                    .then_some(())
+                    .ok_or(consts::CL_INVALID_PROPERTY)
+            }
+            _ => Err(consts::CL_INVALID_PROPERTY),
+        }
+    }
+
+    pub fn select_devices(
+        devices: &[ffi::cl_device_id],
+    ) -> Result<Vec<ffi::cl_device_id>, ffi::cl_int> {
+        let mut selected: Vec<ffi::cl_device_id> = Vec::new();
+
+        for device in devices {
+            if !VoddPlatform::is_device_id(*device) {
+                return Err(consts::CL_INVALID_DEVICE);
+            }
+
+            if !selected.contains(device) {
+                selected.push(*device);
+            }
+        }
+
+        Ok(selected)
+    }
+
+    pub fn devices_of_type(device_type: ffi::cl_device_type) -> Vec<ffi::cl_device_id> {
+        if VoddPlatform::is_valid_device_type(device_type)
+            && (device_type & VODD_DEVICE_TYPE != 0
+                || device_type == consts::CL_DEVICE_TYPE_DEFAULT)
+        {
+            vec![VoddPlatform::device_id()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub unsafe fn notify(&self, errinfo: *const core::ffi::c_char) {
+        if let Some(notify) = self.notify {
+            unsafe { notify(errinfo, core::ptr::null(), 0, self.user_data) };
+        }
     }
 }

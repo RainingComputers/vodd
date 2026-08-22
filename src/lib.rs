@@ -6,10 +6,10 @@
 
 pub mod bitcode;
 pub mod consts;
-pub mod device;
 pub mod ffi;
 pub mod interpreter;
 pub mod parser;
+pub mod platform;
 pub mod value;
 
 unsafe fn info_bytes(
@@ -66,35 +66,44 @@ unsafe fn info_scalar<T>(
 }
 
 unsafe fn info_value(
-    value: device::InfoValue,
+    value: platform::InfoValue<'_>,
     param_value_size: usize,
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> ffi::cl_int {
     unsafe {
         match value {
-            device::InfoValue::Uint(v) => {
+            platform::InfoValue::Uint(v) => {
                 info_scalar(v, param_value_size, param_value, param_value_size_ret)
             }
-            device::InfoValue::Ulong(v) => {
+            platform::InfoValue::Ulong(v) => {
                 info_scalar(v, param_value_size, param_value, param_value_size_ret)
             }
-            device::InfoValue::Size(v) => {
+            platform::InfoValue::Size(v) => {
                 info_scalar(v, param_value_size, param_value, param_value_size_ret)
             }
-            device::InfoValue::Handle(v) => {
+            platform::InfoValue::Handle(v) => {
                 info_scalar(v, param_value_size, param_value, param_value_size_ret)
             }
-            device::InfoValue::Sizes(v) => {
+            platform::InfoValue::Handles(v) => {
                 info_slice(v, param_value_size, param_value, param_value_size_ret)
             }
-            device::InfoValue::Properties(v) => {
+            platform::InfoValue::Sizes(v) => {
                 info_slice(v, param_value_size, param_value, param_value_size_ret)
             }
-            device::InfoValue::Text(v) => {
+            platform::InfoValue::Properties(v) => {
+                info_slice(v, param_value_size, param_value, param_value_size_ret)
+            }
+            platform::InfoValue::Text(v) => {
                 info_bytes(v, param_value_size, param_value, param_value_size_ret)
             }
         }
+    }
+}
+
+unsafe fn info_write(out: *mut ffi::cl_int, value: ffi::cl_int) {
+    if !out.is_null() {
+        unsafe { *out = value };
     }
 }
 
@@ -114,7 +123,7 @@ pub unsafe extern "C" fn clGetPlatformIDs(
 
     if !platforms.is_null() {
         unsafe {
-            *platforms = device::VoddDevice::platform_id();
+            *platforms = platform::VoddPlatform::platform_id();
         }
     }
 
@@ -135,11 +144,11 @@ pub unsafe extern "C" fn clGetPlatformInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> ffi::cl_int {
-    if !platform.is_null() && !device::VoddDevice::is_platform_id(platform) {
+    if !platform.is_null() && !platform::VoddPlatform::is_platform_id(platform) {
         return consts::CL_INVALID_PLATFORM;
     }
 
-    let Some(text) = device::VoddDevice::platform_info(param_name) else {
+    let Some(text) = platform::VoddPlatform::platform_info(param_name) else {
         return consts::CL_INVALID_VALUE;
     };
 
@@ -154,7 +163,7 @@ pub unsafe extern "C" fn clGetDeviceIDs(
     devices: *mut ffi::cl_device_id,
     num_devices: *mut ffi::cl_uint,
 ) -> ffi::cl_int {
-    if !platform.is_null() && !device::VoddDevice::is_platform_id(platform) {
+    if !platform.is_null() && !platform::VoddPlatform::is_platform_id(platform) {
         return consts::CL_INVALID_PLATFORM;
     }
 
@@ -166,13 +175,13 @@ pub unsafe extern "C" fn clGetDeviceIDs(
         return consts::CL_INVALID_VALUE;
     }
 
-    if !device::VoddDevice::is_valid_device_type(device_type) {
+    if !platform::VoddPlatform::is_valid_device_type(device_type) {
         return consts::CL_INVALID_DEVICE_TYPE;
     }
 
     if !devices.is_null() {
         unsafe {
-            *devices = device::VoddDevice::device_id();
+            *devices = platform::VoddPlatform::device_id();
         }
     }
 
@@ -193,11 +202,11 @@ pub unsafe extern "C" fn clGetDeviceInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> ffi::cl_int {
-    if !device::VoddDevice::is_device_id(device) {
+    if !platform::VoddPlatform::is_device_id(device) {
         return consts::CL_INVALID_DEVICE;
     }
 
-    let Some(value) = device::VoddDevice::device_info(param_name) else {
+    let Some(value) = platform::VoddPlatform::device_info(param_name) else {
         return consts::CL_INVALID_VALUE;
     };
 
@@ -212,7 +221,7 @@ pub unsafe extern "C" fn clCreateSubDevices(
     out_devices: *mut ffi::cl_device_id,
     num_devices_ret: *mut ffi::cl_uint,
 ) -> ffi::cl_int {
-    if !device::VoddDevice::is_device_id(in_device) {
+    if !platform::VoddPlatform::is_device_id(in_device) {
         return consts::CL_INVALID_DEVICE;
     }
 
@@ -221,7 +230,7 @@ pub unsafe extern "C" fn clCreateSubDevices(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clRetainDevice(device: ffi::cl_device_id) -> ffi::cl_int {
-    if !device::VoddDevice::is_device_id(device) {
+    if !platform::VoddPlatform::is_device_id(device) {
         return consts::CL_INVALID_DEVICE;
     }
 
@@ -230,11 +239,70 @@ pub unsafe extern "C" fn clRetainDevice(device: ffi::cl_device_id) -> ffi::cl_in
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clReleaseDevice(device: ffi::cl_device_id) -> ffi::cl_int {
-    if !device::VoddDevice::is_device_id(device) {
+    if !platform::VoddPlatform::is_device_id(device) {
         return consts::CL_INVALID_DEVICE;
     }
 
     consts::CL_SUCCESS
+}
+
+unsafe fn context_properties(
+    properties: *const ffi::cl_context_properties,
+) -> Vec<ffi::cl_context_properties> {
+    if properties.is_null() {
+        return Vec::new();
+    }
+
+    let mut collected = Vec::new();
+    let mut cursor = properties;
+
+    unsafe {
+        while *cursor != 0 {
+            collected.push(*cursor);
+            cursor = cursor.add(1);
+        }
+    }
+    collected.push(0);
+
+    collected
+}
+
+unsafe fn create_context(
+    properties: *const ffi::cl_context_properties,
+    devices: Vec<ffi::cl_device_id>,
+    pfn_notify: Option<ffi::cl_context_callback>,
+    user_data: *mut core::ffi::c_void,
+    errcode_ret: *mut ffi::cl_int,
+) -> ffi::cl_context {
+    if pfn_notify.is_none() && !user_data.is_null() {
+        return unsafe { context_error(consts::CL_INVALID_VALUE, errcode_ret) };
+    }
+
+    let collected = unsafe { context_properties(properties) };
+    if let Err(error) = platform::VoddContext::validate_properties(&collected) {
+        return unsafe { context_error(error, errcode_ret) };
+    }
+
+    let context = Box::new(platform::VoddContext::new(
+        collected, devices, pfn_notify, user_data,
+    ));
+
+    unsafe { info_write(errcode_ret, consts::CL_SUCCESS) };
+    Box::into_raw(context) as ffi::cl_context
+}
+
+unsafe fn context_error(error: ffi::cl_int, errcode_ret: *mut ffi::cl_int) -> ffi::cl_context {
+    unsafe { info_write(errcode_ret, error) };
+    core::ptr::null_mut()
+}
+
+unsafe fn as_context<'a>(context: ffi::cl_context) -> Option<&'a platform::VoddContext> {
+    if context.is_null() {
+        return None;
+    }
+
+    let context = unsafe { &*(context as *const platform::VoddContext) };
+    context.is_context().then_some(context)
 }
 
 #[unsafe(no_mangle)]
@@ -242,46 +310,64 @@ pub unsafe extern "C" fn clCreateContext(
     properties: *const ffi::cl_context_properties,
     num_devices: ffi::cl_uint,
     devices: *const ffi::cl_device_id,
-    pfn_notify: Option<
-        unsafe extern "C" fn(
-            *const core::ffi::c_char,
-            *const core::ffi::c_void,
-            usize,
-            *mut core::ffi::c_void,
-        ),
-    >,
+    pfn_notify: Option<ffi::cl_context_callback>,
     user_data: *mut core::ffi::c_void,
     errcode_ret: *mut ffi::cl_int,
 ) -> ffi::cl_context {
-    panic!("clCreateContext is not implemented");
+    if devices.is_null() || num_devices == 0 {
+        return unsafe { context_error(consts::CL_INVALID_VALUE, errcode_ret) };
+    }
+
+    let requested = unsafe { core::slice::from_raw_parts(devices, num_devices as usize) };
+
+    let selected = match platform::VoddContext::select_devices(requested) {
+        Ok(selected) => selected,
+        Err(error) => return unsafe { context_error(error, errcode_ret) },
+    };
+
+    unsafe { create_context(properties, selected, pfn_notify, user_data, errcode_ret) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clCreateContextFromType(
     properties: *const ffi::cl_context_properties,
     device_type: ffi::cl_device_type,
-    pfn_notify: Option<
-        unsafe extern "C" fn(
-            *const core::ffi::c_char,
-            *const core::ffi::c_void,
-            usize,
-            *mut core::ffi::c_void,
-        ),
-    >,
+    pfn_notify: Option<ffi::cl_context_callback>,
     user_data: *mut core::ffi::c_void,
     errcode_ret: *mut ffi::cl_int,
 ) -> ffi::cl_context {
-    panic!("clCreateContextFromType is not implemented");
+    if !platform::VoddPlatform::is_valid_device_type(device_type) {
+        return unsafe { context_error(consts::CL_INVALID_DEVICE_TYPE, errcode_ret) };
+    }
+
+    let selected = platform::VoddContext::devices_of_type(device_type);
+    if selected.is_empty() {
+        return unsafe { context_error(consts::CL_DEVICE_NOT_FOUND, errcode_ret) };
+    }
+
+    unsafe { create_context(properties, selected, pfn_notify, user_data, errcode_ret) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clRetainContext(context: ffi::cl_context) -> ffi::cl_int {
-    panic!("clRetainContext is not implemented");
+    let Some(context) = (unsafe { as_context(context) }) else {
+        return consts::CL_INVALID_CONTEXT;
+    };
+
+    context.retain();
+    consts::CL_SUCCESS
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clReleaseContext(context: ffi::cl_context) -> ffi::cl_int {
-    panic!("clReleaseContext is not implemented");
+    let Some(released) = (unsafe { as_context(context) }) else {
+        return consts::CL_INVALID_CONTEXT;
+    };
+
+    if released.release() {
+        drop(unsafe { Box::from_raw(context as *mut platform::VoddContext) });
+    }
+    consts::CL_SUCCESS
 }
 
 #[unsafe(no_mangle)]
@@ -292,7 +378,15 @@ pub unsafe extern "C" fn clGetContextInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> ffi::cl_int {
-    panic!("clGetContextInfo is not implemented");
+    let Some(context) = (unsafe { as_context(context) }) else {
+        return consts::CL_INVALID_CONTEXT;
+    };
+
+    let Some(value) = context.info(param_name) else {
+        return consts::CL_INVALID_VALUE;
+    };
+
+    unsafe { info_value(value, param_value_size, param_value, param_value_size_ret) }
 }
 
 #[unsafe(no_mangle)]
@@ -1083,7 +1177,7 @@ pub unsafe extern "C" fn clGetExtensionFunctionAddress(
     func_name: *const core::ffi::c_char,
 ) -> *mut core::ffi::c_void {
     unsafe {
-        clGetExtensionFunctionAddressForPlatform(device::VoddDevice::platform_id(), func_name)
+        clGetExtensionFunctionAddressForPlatform(platform::VoddPlatform::platform_id(), func_name)
     }
 }
 
