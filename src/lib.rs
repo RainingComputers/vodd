@@ -8,104 +8,10 @@ pub mod bitcode;
 pub mod consts;
 pub mod ffi;
 pub mod interpreter;
+pub mod marshal;
 pub mod parser;
 pub mod platform;
 pub mod value;
-
-unsafe fn info_bytes(
-    src: &[u8],
-    param_value_size: usize,
-    param_value: *mut core::ffi::c_void,
-    param_value_size_ret: *mut usize,
-) -> ffi::cl_int {
-    if !param_value.is_null() {
-        if param_value_size < src.len() {
-            return consts::CL_INVALID_VALUE;
-        }
-        unsafe {
-            core::ptr::copy_nonoverlapping(src.as_ptr(), param_value.cast::<u8>(), src.len());
-        }
-    }
-
-    if !param_value_size_ret.is_null() {
-        unsafe {
-            *param_value_size_ret = src.len();
-        }
-    }
-
-    consts::CL_SUCCESS
-}
-
-unsafe fn info_slice<T>(
-    values: &[T],
-    param_value_size: usize,
-    param_value: *mut core::ffi::c_void,
-    param_value_size_ret: *mut usize,
-) -> ffi::cl_int {
-    let bytes = unsafe {
-        core::slice::from_raw_parts(values.as_ptr().cast::<u8>(), core::mem::size_of_val(values))
-    };
-
-    unsafe { info_bytes(bytes, param_value_size, param_value, param_value_size_ret) }
-}
-
-unsafe fn info_scalar<T>(
-    value: T,
-    param_value_size: usize,
-    param_value: *mut core::ffi::c_void,
-    param_value_size_ret: *mut usize,
-) -> ffi::cl_int {
-    unsafe {
-        info_slice(
-            &[value],
-            param_value_size,
-            param_value,
-            param_value_size_ret,
-        )
-    }
-}
-
-unsafe fn info_value(
-    value: platform::InfoValue<'_>,
-    param_value_size: usize,
-    param_value: *mut core::ffi::c_void,
-    param_value_size_ret: *mut usize,
-) -> ffi::cl_int {
-    unsafe {
-        match value {
-            platform::InfoValue::Uint(v) => {
-                info_scalar(v, param_value_size, param_value, param_value_size_ret)
-            }
-            platform::InfoValue::Ulong(v) => {
-                info_scalar(v, param_value_size, param_value, param_value_size_ret)
-            }
-            platform::InfoValue::Size(v) => {
-                info_scalar(v, param_value_size, param_value, param_value_size_ret)
-            }
-            platform::InfoValue::Handle(v) => {
-                info_scalar(v, param_value_size, param_value, param_value_size_ret)
-            }
-            platform::InfoValue::Handles(v) => {
-                info_slice(v, param_value_size, param_value, param_value_size_ret)
-            }
-            platform::InfoValue::Sizes(v) => {
-                info_slice(v, param_value_size, param_value, param_value_size_ret)
-            }
-            platform::InfoValue::Properties(v) => {
-                info_slice(v, param_value_size, param_value, param_value_size_ret)
-            }
-            platform::InfoValue::Text(v) => {
-                info_bytes(v, param_value_size, param_value, param_value_size_ret)
-            }
-        }
-    }
-}
-
-unsafe fn info_write(out: *mut ffi::cl_int, value: ffi::cl_int) {
-    if !out.is_null() {
-        unsafe { *out = value };
-    }
-}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clGetPlatformIDs(
@@ -152,7 +58,7 @@ pub unsafe extern "C" fn clGetPlatformInfo(
         return consts::CL_INVALID_VALUE;
     };
 
-    unsafe { info_bytes(text, param_value_size, param_value, param_value_size_ret) }
+    unsafe { marshal::info_bytes(text, param_value_size, param_value, param_value_size_ret) }
 }
 
 #[unsafe(no_mangle)]
@@ -210,7 +116,7 @@ pub unsafe extern "C" fn clGetDeviceInfo(
         return consts::CL_INVALID_VALUE;
     };
 
-    unsafe { info_value(value, param_value_size, param_value, param_value_size_ret) }
+    unsafe { marshal::info_value(value, param_value_size, param_value, param_value_size_ret) }
 }
 
 #[unsafe(no_mangle)]
@@ -246,65 +152,6 @@ pub unsafe extern "C" fn clReleaseDevice(device: ffi::cl_device_id) -> ffi::cl_i
     consts::CL_SUCCESS
 }
 
-unsafe fn context_properties(
-    properties: *const ffi::cl_context_properties,
-) -> Vec<ffi::cl_context_properties> {
-    if properties.is_null() {
-        return Vec::new();
-    }
-
-    let mut collected = Vec::new();
-    let mut cursor = properties;
-
-    unsafe {
-        while *cursor != 0 {
-            collected.push(*cursor);
-            cursor = cursor.add(1);
-        }
-    }
-    collected.push(0);
-
-    collected
-}
-
-unsafe fn create_context(
-    properties: *const ffi::cl_context_properties,
-    devices: Vec<ffi::cl_device_id>,
-    pfn_notify: Option<ffi::cl_context_callback>,
-    user_data: *mut core::ffi::c_void,
-    errcode_ret: *mut ffi::cl_int,
-) -> ffi::cl_context {
-    if pfn_notify.is_none() && !user_data.is_null() {
-        return unsafe { context_error(consts::CL_INVALID_VALUE, errcode_ret) };
-    }
-
-    let collected = unsafe { context_properties(properties) };
-    if let Err(error) = platform::VoddContext::validate_properties(&collected) {
-        return unsafe { context_error(error, errcode_ret) };
-    }
-
-    let context = Box::new(platform::VoddContext::new(
-        collected, devices, pfn_notify, user_data,
-    ));
-
-    unsafe { info_write(errcode_ret, consts::CL_SUCCESS) };
-    Box::into_raw(context) as ffi::cl_context
-}
-
-unsafe fn context_error(error: ffi::cl_int, errcode_ret: *mut ffi::cl_int) -> ffi::cl_context {
-    unsafe { info_write(errcode_ret, error) };
-    core::ptr::null_mut()
-}
-
-unsafe fn as_context<'a>(context: ffi::cl_context) -> Option<&'a platform::VoddContext> {
-    if context.is_null() {
-        return None;
-    }
-
-    let context = unsafe { &*(context as *const platform::VoddContext) };
-    context.is_context().then_some(context)
-}
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clCreateContext(
     properties: *const ffi::cl_context_properties,
@@ -315,17 +162,17 @@ pub unsafe extern "C" fn clCreateContext(
     errcode_ret: *mut ffi::cl_int,
 ) -> ffi::cl_context {
     if devices.is_null() || num_devices == 0 {
-        return unsafe { context_error(consts::CL_INVALID_VALUE, errcode_ret) };
+        return unsafe { marshal::context_error(consts::CL_INVALID_VALUE, errcode_ret) };
     }
 
     let requested = unsafe { core::slice::from_raw_parts(devices, num_devices as usize) };
 
     let selected = match platform::VoddContext::select_devices(requested) {
         Ok(selected) => selected,
-        Err(error) => return unsafe { context_error(error, errcode_ret) },
+        Err(error) => return unsafe { marshal::context_error(error, errcode_ret) },
     };
 
-    unsafe { create_context(properties, selected, pfn_notify, user_data, errcode_ret) }
+    unsafe { marshal::create_context(properties, selected, pfn_notify, user_data, errcode_ret) }
 }
 
 #[unsafe(no_mangle)]
@@ -337,36 +184,32 @@ pub unsafe extern "C" fn clCreateContextFromType(
     errcode_ret: *mut ffi::cl_int,
 ) -> ffi::cl_context {
     if !platform::VoddPlatform::is_valid_device_type(device_type) {
-        return unsafe { context_error(consts::CL_INVALID_DEVICE_TYPE, errcode_ret) };
+        return unsafe { marshal::context_error(consts::CL_INVALID_DEVICE_TYPE, errcode_ret) };
     }
 
     let selected = platform::VoddContext::devices_of_type(device_type);
     if selected.is_empty() {
-        return unsafe { context_error(consts::CL_DEVICE_NOT_FOUND, errcode_ret) };
+        return unsafe { marshal::context_error(consts::CL_DEVICE_NOT_FOUND, errcode_ret) };
     }
 
-    unsafe { create_context(properties, selected, pfn_notify, user_data, errcode_ret) }
+    unsafe { marshal::create_context(properties, selected, pfn_notify, user_data, errcode_ret) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clRetainContext(context: ffi::cl_context) -> ffi::cl_int {
-    let Some(context) = (unsafe { as_context(context) }) else {
+    if !platform::VoddContext::retain(marshal::object_id(context)) {
         return consts::CL_INVALID_CONTEXT;
-    };
+    }
 
-    context.retain();
     consts::CL_SUCCESS
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clReleaseContext(context: ffi::cl_context) -> ffi::cl_int {
-    let Some(released) = (unsafe { as_context(context) }) else {
+    if platform::VoddContext::release(marshal::object_id(context)).is_none() {
         return consts::CL_INVALID_CONTEXT;
-    };
-
-    if released.release() {
-        drop(unsafe { Box::from_raw(context as *mut platform::VoddContext) });
     }
+
     consts::CL_SUCCESS
 }
 
@@ -378,27 +221,44 @@ pub unsafe extern "C" fn clGetContextInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> ffi::cl_int {
-    let Some(context) = (unsafe { as_context(context) }) else {
-        return consts::CL_INVALID_CONTEXT;
-    };
+    let queried = platform::VoddContext::with(marshal::object_id(context), |context| {
+        let value = context.info(param_name)?;
 
-    let Some(value) = context.info(param_name) else {
-        return consts::CL_INVALID_VALUE;
-    };
+        Some(unsafe {
+            marshal::info_value(value, param_value_size, param_value, param_value_size_ret)
+        })
+    });
 
-    unsafe { info_value(value, param_value_size, param_value, param_value_size_ret) }
+    match queried {
+        None => consts::CL_INVALID_CONTEXT,
+        Some(None) => consts::CL_INVALID_VALUE,
+        Some(Some(error)) => error,
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clRetainCommandQueue(command_queue: ffi::cl_command_queue) -> ffi::cl_int {
-    panic!("clRetainCommandQueue is not implemented");
+    if !platform::VoddCommandQueue::retain(marshal::object_id(command_queue)) {
+        return consts::CL_INVALID_COMMAND_QUEUE;
+    }
+
+    consts::CL_SUCCESS
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clReleaseCommandQueue(
     command_queue: ffi::cl_command_queue,
 ) -> ffi::cl_int {
-    panic!("clReleaseCommandQueue is not implemented");
+    let Some(released) = platform::VoddCommandQueue::release(marshal::object_id(command_queue))
+    else {
+        return consts::CL_INVALID_COMMAND_QUEUE;
+    };
+
+    if let Some(context) = released {
+        platform::VoddContext::release(marshal::object_id(context));
+    }
+
+    consts::CL_SUCCESS
 }
 
 #[unsafe(no_mangle)]
@@ -409,7 +269,19 @@ pub unsafe extern "C" fn clGetCommandQueueInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> ffi::cl_int {
-    panic!("clGetCommandQueueInfo is not implemented");
+    let queried = platform::VoddCommandQueue::with(marshal::object_id(command_queue), |queue| {
+        let value = queue.info(param_name)?;
+
+        Some(unsafe {
+            marshal::info_value(value, param_value_size, param_value, param_value_size_ret)
+        })
+    });
+
+    match queried {
+        None => consts::CL_INVALID_COMMAND_QUEUE,
+        Some(None) => consts::CL_INVALID_VALUE,
+        Some(Some(error)) => error,
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -1109,8 +981,8 @@ pub unsafe extern "C" fn clEnqueueBarrierWithWaitList(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clGetExtensionFunctionAddressForPlatform(
-    platform: ffi::cl_platform_id,
-    func_name: *const core::ffi::c_char,
+    _platform: ffi::cl_platform_id,
+    _func_name: *const core::ffi::c_char,
 ) -> *mut core::ffi::c_void {
     core::ptr::null_mut()
 }
@@ -1188,7 +1060,26 @@ pub unsafe extern "C" fn clCreateCommandQueue(
     properties: ffi::cl_command_queue_properties,
     errcode_ret: *mut ffi::cl_int,
 ) -> ffi::cl_command_queue {
-    panic!("clCreateCommandQueue is not implemented");
+    let Some(associated) = platform::VoddContext::with(marshal::object_id(context), |owner| {
+        owner.has_device(device)
+    }) else {
+        return unsafe { marshal::queue_error(consts::CL_INVALID_CONTEXT, errcode_ret) };
+    };
+
+    if !associated {
+        return unsafe { marshal::queue_error(consts::CL_INVALID_DEVICE, errcode_ret) };
+    }
+
+    if let Err(error) = platform::VoddCommandQueue::validate_properties(properties) {
+        return unsafe { marshal::queue_error(error, errcode_ret) };
+    }
+
+    platform::VoddContext::retain(marshal::object_id(context));
+
+    let id = platform::VoddCommandQueue::create(context, device, properties);
+
+    unsafe { marshal::info_write(errcode_ret, consts::CL_SUCCESS) };
+    marshal::object_handle(id)
 }
 
 #[unsafe(no_mangle)]

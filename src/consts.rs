@@ -7,6 +7,8 @@ pub const CL_INVALID_DEVICE_TYPE: ffi::cl_int = -31;
 pub const CL_INVALID_PLATFORM: ffi::cl_int = -32;
 pub const CL_INVALID_DEVICE: ffi::cl_int = -33;
 pub const CL_INVALID_CONTEXT: ffi::cl_int = -34;
+pub const CL_INVALID_QUEUE_PROPERTIES: ffi::cl_int = -35;
+pub const CL_INVALID_COMMAND_QUEUE: ffi::cl_int = -36;
 pub const CL_INVALID_PROPERTY: ffi::cl_int = -64;
 pub const CL_OUT_OF_HOST_MEMORY: ffi::cl_int = -6;
 
@@ -31,6 +33,11 @@ pub const CL_CONTEXT_NUM_DEVICES: ffi::cl_context_info = 0x1083;
 
 pub const CL_CONTEXT_PLATFORM: ffi::cl_context_properties = 0x1084;
 pub const CL_CONTEXT_INTEROP_USER_SYNC: ffi::cl_context_properties = 0x1085;
+
+pub const CL_QUEUE_CONTEXT: ffi::cl_command_queue_info = 0x1090;
+pub const CL_QUEUE_DEVICE: ffi::cl_command_queue_info = 0x1091;
+pub const CL_QUEUE_REFERENCE_COUNT: ffi::cl_command_queue_info = 0x1092;
+pub const CL_QUEUE_PROPERTIES: ffi::cl_command_queue_info = 0x1093;
 
 pub const CL_PLATFORM_PROFILE: ffi::cl_platform_info = 0x0900;
 pub const CL_PLATFORM_VERSION: ffi::cl_platform_info = 0x0901;
@@ -116,4 +123,5 @@ pub const CL_FP_INF_NAN: ffi::cl_device_fp_config = 1 << 1;
 pub const CL_FP_ROUND_TO_NEAREST: ffi::cl_device_fp_config = 1 << 2;
 
 pub const CL_EXEC_KERNEL: ffi::cl_device_exec_capabilities = 1 << 0;
+pub const CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE: ffi::cl_command_queue_properties = 1 << 0;
 pub const CL_QUEUE_PROFILING_ENABLE: ffi::cl_command_queue_properties = 1 << 1;

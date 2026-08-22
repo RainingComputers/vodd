@@ -5,6 +5,7 @@
         "bitfield",
         "CACHELINE",
         "componentwise",
+        "Deque",
         "errcode",
         "errinfo",
         "memobj",

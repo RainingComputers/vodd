@@ -1,10 +1,22 @@
 use crate::consts;
 use crate::ffi;
+use std::collections::BTreeMap;
+use std::collections::VecDeque;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
 
 static VODD_PLATFORM_TOKEN: u8 = 0xA0;
 static VODD_DEVICE_TOKEN: u8 = 0xD0;
 const VODD_DEVICE_TYPE: ffi::cl_device_type = consts::CL_DEVICE_TYPE_GPU;
-const VODD_CONTEXT_MAGIC: u32 = 0xC0FF_EEC7;
+
+static NEXT_OBJECT_ID: AtomicU32 = AtomicU32::new(1);
+static CONTEXTS: Mutex<BTreeMap<ffi::cl_uint, VoddContext>> = Mutex::new(BTreeMap::new());
+static QUEUES: Mutex<BTreeMap<ffi::cl_uint, VoddCommandQueue>> = Mutex::new(BTreeMap::new());
+
+fn next_object_id() -> ffi::cl_uint {
+    NEXT_OBJECT_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 pub enum InfoValue<'a> {
     Uint(ffi::cl_uint),
@@ -146,11 +158,9 @@ impl VoddPlatform {
 }
 
 unsafe impl Send for VoddContext {}
-unsafe impl Sync for VoddContext {}
 
 pub struct VoddContext {
-    magic: u32,
-    reference_count: core::sync::atomic::AtomicU32,
+    reference_count: ffi::cl_uint,
     devices: Vec<ffi::cl_device_id>,
     properties: Vec<ffi::cl_context_properties>,
     notify: Option<ffi::cl_context_callback>,
@@ -158,43 +168,56 @@ pub struct VoddContext {
 }
 
 impl VoddContext {
-    pub fn new(
+    pub fn create(
         properties: Vec<ffi::cl_context_properties>,
         devices: Vec<ffi::cl_device_id>,
         notify: Option<ffi::cl_context_callback>,
         user_data: *mut core::ffi::c_void,
-    ) -> Self {
-        Self {
-            magic: VODD_CONTEXT_MAGIC,
-            reference_count: core::sync::atomic::AtomicU32::new(1),
-            devices,
-            properties,
-            notify,
-            user_data,
+    ) -> ffi::cl_uint {
+        let id = next_object_id();
+
+        CONTEXTS.lock().expect("contexts").insert(
+            id,
+            Self { reference_count: 1, devices, properties, notify, user_data },
+        );
+
+        id
+    }
+
+    pub fn retain(id: ffi::cl_uint) -> bool {
+        CONTEXTS
+            .lock()
+            .expect("contexts")
+            .get_mut(&id)
+            .map(|context| context.reference_count += 1)
+            .is_some()
+    }
+
+    pub fn release(id: ffi::cl_uint) -> Option<bool> {
+        let mut contexts = CONTEXTS.lock().expect("contexts");
+        let context = contexts.get_mut(&id)?;
+
+        context.reference_count -= 1;
+
+        if context.reference_count == 0 {
+            contexts.remove(&id);
+            return Some(true);
         }
+
+        Some(false)
     }
 
-    pub fn is_context(&self) -> bool {
-        self.magic == VODD_CONTEXT_MAGIC
+    pub fn with<T>(id: ffi::cl_uint, action: impl FnOnce(&VoddContext) -> T) -> Option<T> {
+        CONTEXTS.lock().expect("contexts").get(&id).map(action)
     }
 
-    pub fn retain(&self) {
-        self.reference_count
-            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub fn release(&self) -> bool {
-        self.reference_count
-            .fetch_sub(1, core::sync::atomic::Ordering::AcqRel)
-            == 1
+    pub fn has_device(&self, device: ffi::cl_device_id) -> bool {
+        self.devices.contains(&device)
     }
 
     pub fn info(&self, param_name: ffi::cl_context_info) -> Option<InfoValue<'_>> {
         match param_name {
-            consts::CL_CONTEXT_REFERENCE_COUNT => Some(InfoValue::Uint(
-                self.reference_count
-                    .load(core::sync::atomic::Ordering::Relaxed),
-            )),
+            consts::CL_CONTEXT_REFERENCE_COUNT => Some(InfoValue::Uint(self.reference_count)),
             consts::CL_CONTEXT_NUM_DEVICES => {
                 Some(InfoValue::Uint(self.devices.len() as ffi::cl_uint))
             }
@@ -209,11 +232,13 @@ impl VoddContext {
     ) -> Result<(), ffi::cl_int> {
         let listed = properties.strip_suffix(&[0]).unwrap_or(properties);
         let mut pairs = listed.chunks_exact(2);
+
         if !pairs.remainder().is_empty() {
             return Err(consts::CL_INVALID_PROPERTY);
         }
 
         let named: Vec<ffi::cl_context_properties> = pairs.clone().map(|pair| pair[0]).collect();
+
         if named
             .iter()
             .enumerate()
@@ -276,6 +301,121 @@ impl VoddContext {
     pub unsafe fn notify(&self, errinfo: *const core::ffi::c_char) {
         if let Some(notify) = self.notify {
             unsafe { notify(errinfo, core::ptr::null(), 0, self.user_data) };
+        }
+    }
+}
+
+pub struct Command {}
+
+unsafe impl Send for VoddCommandQueue {}
+
+pub struct VoddCommandQueue {
+    reference_count: ffi::cl_uint,
+    context: ffi::cl_context,
+    device: ffi::cl_device_id,
+    properties: ffi::cl_command_queue_properties,
+    commands: VecDeque<Command>,
+}
+
+impl VoddCommandQueue {
+    pub fn create(
+        context: ffi::cl_context,
+        device: ffi::cl_device_id,
+        properties: ffi::cl_command_queue_properties,
+    ) -> ffi::cl_uint {
+        let id = next_object_id();
+
+        QUEUES.lock().expect("queues").insert(
+            id,
+            Self {
+                reference_count: 1,
+                context,
+                device,
+                properties,
+                commands: VecDeque::new(),
+            },
+        );
+
+        id
+    }
+
+    pub fn retain(id: ffi::cl_uint) -> bool {
+        QUEUES
+            .lock()
+            .expect("queues")
+            .get_mut(&id)
+            .map(|queue| queue.reference_count += 1)
+            .is_some()
+    }
+
+    pub fn release(id: ffi::cl_uint) -> Option<Option<ffi::cl_context>> {
+        let mut queues = QUEUES.lock().expect("queues");
+        let queue = queues.get_mut(&id)?;
+
+        queue.reference_count -= 1;
+
+        if queue.reference_count == 0 {
+            let context = queue.context;
+            queues.remove(&id);
+
+            return Some(Some(context));
+        }
+
+        Some(None)
+    }
+
+    pub fn with<T>(id: ffi::cl_uint, action: impl FnOnce(&VoddCommandQueue) -> T) -> Option<T> {
+        QUEUES.lock().expect("queues").get(&id).map(action)
+    }
+
+    pub fn push(id: ffi::cl_uint, command: Command) -> bool {
+        QUEUES
+            .lock()
+            .expect("queues")
+            .get_mut(&id)
+            .map(|queue| queue.commands.push_back(command))
+            .is_some()
+    }
+
+    pub fn pop(id: ffi::cl_uint) -> Option<Command> {
+        QUEUES
+            .lock()
+            .expect("queues")
+            .get_mut(&id)?
+            .commands
+            .pop_front()
+    }
+
+    pub fn validate_properties(
+        properties: ffi::cl_command_queue_properties,
+    ) -> Result<(), ffi::cl_int> {
+        let known =
+            consts::CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | consts::CL_QUEUE_PROFILING_ENABLE;
+
+        if properties & !known != 0 {
+            return Err(consts::CL_INVALID_VALUE);
+        }
+
+        let Some(InfoValue::Ulong(supported)) =
+            VoddPlatform::device_info(consts::CL_DEVICE_QUEUE_PROPERTIES)
+        else {
+            return Err(consts::CL_INVALID_QUEUE_PROPERTIES);
+        };
+
+        if properties & !supported != 0 {
+            return Err(consts::CL_INVALID_QUEUE_PROPERTIES);
+        }
+
+        Ok(())
+    }
+
+    pub fn info(&self, param_name: ffi::cl_command_queue_info) -> Option<InfoValue<'_>> {
+        match param_name {
+            consts::CL_QUEUE_CONTEXT => Some(InfoValue::Handle(self.context.cast())),
+            consts::CL_QUEUE_DEVICE => Some(InfoValue::Handle(self.device.cast())),
+            consts::CL_QUEUE_REFERENCE_COUNT => Some(InfoValue::Uint(self.reference_count)),
+            consts::CL_QUEUE_PROPERTIES => Some(InfoValue::Ulong(self.properties)),
+            _ => None,
         }
     }
 }
