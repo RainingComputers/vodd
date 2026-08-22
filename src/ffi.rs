@@ -1,145 +1,167 @@
-pub type cl_char = i8;
-pub type cl_uchar = u8;
-pub type cl_short = i16;
-pub type cl_ushort = u16;
-pub type cl_int = i32;
-pub type cl_uint = u32;
-pub type cl_long = i64;
-pub type cl_ulong = u64;
-pub type cl_half = u16;
-pub type cl_float = f32;
-pub type cl_double = f64;
+use crate::consts;
+use crate::platform;
+use crate::sys;
 
-pub type cl_bitfield = cl_ulong;
-pub type cl_properties = cl_ulong;
-pub type cl_bool = cl_uint;
+pub(crate) unsafe fn context_properties(
+    properties: *const sys::cl_context_properties,
+) -> Vec<sys::cl_context_properties> {
+    if properties.is_null() {
+        return Vec::new();
+    }
 
-pub type cl_addressing_mode = cl_uint;
-pub type cl_buffer_create_type = cl_uint;
-pub type cl_channel_order = cl_uint;
-pub type cl_channel_type = cl_uint;
-pub type cl_command_queue_info = cl_uint;
-pub type cl_command_type = cl_uint;
-pub type cl_context_info = cl_uint;
-pub type cl_context_callback = unsafe extern "C" fn(
-    errinfo: *const core::ffi::c_char,
-    private_info: *const core::ffi::c_void,
-    cb: usize,
+    let mut collected = Vec::new();
+    let mut cursor = properties;
+
+    unsafe {
+        while *cursor != 0 {
+            collected.push(*cursor);
+            cursor = cursor.add(1);
+        }
+    }
+    collected.push(0);
+
+    collected
+}
+
+pub(crate) unsafe fn create_context(
+    properties: *const sys::cl_context_properties,
+    devices: Vec<sys::cl_device_id>,
+    pfn_notify: Option<sys::cl_context_callback>,
     user_data: *mut core::ffi::c_void,
-);
-pub type cl_device_info = cl_uint;
-pub type cl_device_local_mem_type = cl_uint;
-pub type cl_device_mem_cache_type = cl_uint;
-pub type cl_event_info = cl_uint;
-pub type cl_filter_mode = cl_uint;
-pub type cl_image_info = cl_uint;
-pub type cl_kernel_arg_access_qualifier = cl_uint;
-pub type cl_kernel_arg_address_qualifier = cl_uint;
-pub type cl_kernel_arg_info = cl_uint;
-pub type cl_kernel_info = cl_uint;
-pub type cl_kernel_work_group_info = cl_uint;
-pub type cl_mem_info = cl_uint;
-pub type cl_mem_object_type = cl_uint;
-pub type cl_platform_info = cl_uint;
-pub type cl_profiling_info = cl_uint;
-pub type cl_program_binary_type = cl_uint;
-pub type cl_program_build_info = cl_uint;
-pub type cl_program_info = cl_uint;
-pub type cl_sampler_info = cl_uint;
-pub type cl_build_status = cl_int;
+    errcode_ret: *mut sys::cl_int,
+) -> sys::cl_context {
+    if pfn_notify.is_none() && !user_data.is_null() {
+        return unsafe { context_error(consts::CL_INVALID_VALUE, errcode_ret) };
+    }
 
-pub type cl_command_queue_properties = cl_bitfield;
-pub type cl_device_affinity_domain = cl_bitfield;
-pub type cl_device_exec_capabilities = cl_bitfield;
-pub type cl_device_fp_config = cl_bitfield;
-pub type cl_device_type = cl_bitfield;
-pub type cl_map_flags = cl_bitfield;
-pub type cl_mem_flags = cl_bitfield;
-pub type cl_mem_migration_flags = cl_bitfield;
-pub type cl_kernel_arg_type_qualifier = cl_bitfield;
+    let collected = unsafe { context_properties(properties) };
+    if let Err(error) = platform::VoddContext::validate_properties(&collected) {
+        return unsafe { context_error(error, errcode_ret) };
+    }
 
-pub type cl_context_properties = isize;
-pub type cl_device_partition_property = isize;
+    let id = platform::VoddContext::create(collected, devices, pfn_notify, user_data);
 
-#[repr(C)]
-pub struct _cl_platform_id {
-    _opaque: [u8; 0],
-}
-pub type cl_platform_id = *mut _cl_platform_id;
+    unsafe { info_write(errcode_ret, consts::CL_SUCCESS) };
 
-#[repr(C)]
-pub struct _cl_device_id {
-    _opaque: [u8; 0],
-}
-pub type cl_device_id = *mut _cl_device_id;
-
-#[repr(C)]
-pub struct _cl_context {
-    _opaque: [u8; 0],
-}
-pub type cl_context = *mut _cl_context;
-
-#[repr(C)]
-pub struct _cl_command_queue {
-    _opaque: [u8; 0],
-}
-pub type cl_command_queue = *mut _cl_command_queue;
-
-#[repr(C)]
-pub struct _cl_mem {
-    _opaque: [u8; 0],
-}
-pub type cl_mem = *mut _cl_mem;
-
-#[repr(C)]
-pub struct _cl_program {
-    _opaque: [u8; 0],
-}
-pub type cl_program = *mut _cl_program;
-
-#[repr(C)]
-pub struct _cl_kernel {
-    _opaque: [u8; 0],
-}
-pub type cl_kernel = *mut _cl_kernel;
-
-#[repr(C)]
-pub struct _cl_event {
-    _opaque: [u8; 0],
-}
-pub type cl_event = *mut _cl_event;
-
-#[repr(C)]
-pub struct _cl_sampler {
-    _opaque: [u8; 0],
-}
-pub type cl_sampler = *mut _cl_sampler;
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct cl_image_format {
-    pub image_channel_order: cl_channel_order,
-    pub image_channel_data_type: cl_channel_type,
+    object_handle(id)
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct cl_image_desc {
-    pub image_type: cl_mem_object_type,
-    pub image_width: usize,
-    pub image_height: usize,
-    pub image_depth: usize,
-    pub image_array_size: usize,
-    pub image_row_pitch: usize,
-    pub image_slice_pitch: usize,
-    pub num_mip_levels: cl_uint,
-    pub num_samples: cl_uint,
-    pub buffer: cl_mem,
+pub(crate) unsafe fn context_error(
+    error: sys::cl_int,
+    errcode_ret: *mut sys::cl_int,
+) -> sys::cl_context {
+    unsafe { info_write(errcode_ret, error) };
+
+    core::ptr::null_mut()
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct cl_buffer_region {
-    pub origin: usize,
-    pub size: usize,
+pub(crate) unsafe fn queue_error(
+    error: sys::cl_int,
+    errcode_ret: *mut sys::cl_int,
+) -> sys::cl_command_queue {
+    unsafe { info_write(errcode_ret, error) };
+    core::ptr::null_mut()
+}
+
+pub(crate) fn object_handle<T>(id: sys::cl_uint) -> *mut T {
+    id as usize as *mut T
+}
+
+pub(crate) fn object_id<T>(handle: *mut T) -> sys::cl_uint {
+    handle as usize as sys::cl_uint
+}
+
+pub(crate) unsafe fn info_bytes(
+    src: &[u8],
+    param_value_size: usize,
+    param_value: *mut core::ffi::c_void,
+    param_value_size_ret: *mut usize,
+) -> sys::cl_int {
+    if !param_value.is_null() {
+        if param_value_size < src.len() {
+            return consts::CL_INVALID_VALUE;
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), param_value.cast::<u8>(), src.len());
+        }
+    }
+
+    if !param_value_size_ret.is_null() {
+        unsafe {
+            *param_value_size_ret = src.len();
+        }
+    }
+
+    consts::CL_SUCCESS
+}
+
+pub(crate) unsafe fn info_slice<T>(
+    values: &[T],
+    param_value_size: usize,
+    param_value: *mut core::ffi::c_void,
+    param_value_size_ret: *mut usize,
+) -> sys::cl_int {
+    let bytes = unsafe {
+        core::slice::from_raw_parts(values.as_ptr().cast::<u8>(), core::mem::size_of_val(values))
+    };
+
+    unsafe { info_bytes(bytes, param_value_size, param_value, param_value_size_ret) }
+}
+
+pub(crate) unsafe fn info_scalar<T>(
+    value: T,
+    param_value_size: usize,
+    param_value: *mut core::ffi::c_void,
+    param_value_size_ret: *mut usize,
+) -> sys::cl_int {
+    unsafe {
+        info_slice(
+            &[value],
+            param_value_size,
+            param_value,
+            param_value_size_ret,
+        )
+    }
+}
+
+pub(crate) unsafe fn info_value(
+    value: platform::InfoValue<'_>,
+    param_value_size: usize,
+    param_value: *mut core::ffi::c_void,
+    param_value_size_ret: *mut usize,
+) -> sys::cl_int {
+    unsafe {
+        match value {
+            platform::InfoValue::Uint(v) => {
+                info_scalar(v, param_value_size, param_value, param_value_size_ret)
+            }
+            platform::InfoValue::Ulong(v) => {
+                info_scalar(v, param_value_size, param_value, param_value_size_ret)
+            }
+            platform::InfoValue::Size(v) => {
+                info_scalar(v, param_value_size, param_value, param_value_size_ret)
+            }
+            platform::InfoValue::Handle(v) => {
+                info_scalar(v, param_value_size, param_value, param_value_size_ret)
+            }
+            platform::InfoValue::Handles(v) => {
+                info_slice(v, param_value_size, param_value, param_value_size_ret)
+            }
+            platform::InfoValue::Sizes(v) => {
+                info_slice(v, param_value_size, param_value, param_value_size_ret)
+            }
+            platform::InfoValue::Properties(v) => {
+                info_slice(v, param_value_size, param_value, param_value_size_ret)
+            }
+            platform::InfoValue::Text(v) => {
+                info_bytes(v, param_value_size, param_value, param_value_size_ret)
+            }
+        }
+    }
+}
+
+pub(crate) unsafe fn info_write(out: *mut sys::cl_int, value: sys::cl_int) {
+    if !out.is_null() {
+        unsafe { *out = value };
+    }
 }

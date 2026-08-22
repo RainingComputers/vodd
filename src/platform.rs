@@ -1,5 +1,5 @@
 use crate::consts;
-use crate::ffi;
+use crate::sys;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -8,47 +8,47 @@ use std::sync::atomic::Ordering;
 
 static VODD_PLATFORM_TOKEN: u8 = 0xA0;
 static VODD_DEVICE_TOKEN: u8 = 0xD0;
-const VODD_DEVICE_TYPE: ffi::cl_device_type = consts::CL_DEVICE_TYPE_GPU;
+const VODD_DEVICE_TYPE: sys::cl_device_type = consts::CL_DEVICE_TYPE_GPU;
 
 static NEXT_OBJECT_ID: AtomicU32 = AtomicU32::new(1);
-static CONTEXTS: Mutex<BTreeMap<ffi::cl_uint, VoddContext>> = Mutex::new(BTreeMap::new());
-static QUEUES: Mutex<BTreeMap<ffi::cl_uint, VoddCommandQueue>> = Mutex::new(BTreeMap::new());
+static CONTEXTS: Mutex<BTreeMap<sys::cl_uint, VoddContext>> = Mutex::new(BTreeMap::new());
+static QUEUES: Mutex<BTreeMap<sys::cl_uint, VoddCommandQueue>> = Mutex::new(BTreeMap::new());
 
-fn next_object_id() -> ffi::cl_uint {
+fn next_object_id() -> sys::cl_uint {
     NEXT_OBJECT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 pub enum InfoValue<'a> {
-    Uint(ffi::cl_uint),
-    Ulong(ffi::cl_ulong),
+    Uint(sys::cl_uint),
+    Ulong(sys::cl_ulong),
     Size(usize),
     Sizes(&'a [usize]),
     Handle(*mut core::ffi::c_void),
-    Handles(&'a [ffi::cl_device_id]),
+    Handles(&'a [sys::cl_device_id]),
     Text(&'a [u8]),
-    Properties(&'a [ffi::cl_device_partition_property]),
+    Properties(&'a [sys::cl_device_partition_property]),
 }
 
 pub struct VoddPlatform {}
 
 impl VoddPlatform {
-    pub fn platform_id() -> ffi::cl_platform_id {
-        &raw const VODD_PLATFORM_TOKEN as *mut ffi::_cl_platform_id
+    pub fn platform_id() -> sys::cl_platform_id {
+        &raw const VODD_PLATFORM_TOKEN as *mut sys::_cl_platform_id
     }
 
-    pub fn device_id() -> ffi::cl_device_id {
-        &raw const VODD_DEVICE_TOKEN as *mut ffi::_cl_device_id
+    pub fn device_id() -> sys::cl_device_id {
+        &raw const VODD_DEVICE_TOKEN as *mut sys::_cl_device_id
     }
 
-    pub fn is_platform_id(platform: ffi::cl_platform_id) -> bool {
+    pub fn is_platform_id(platform: sys::cl_platform_id) -> bool {
         platform == Self::platform_id()
     }
 
-    pub fn is_device_id(device: ffi::cl_device_id) -> bool {
+    pub fn is_device_id(device: sys::cl_device_id) -> bool {
         device == Self::device_id()
     }
 
-    pub fn is_valid_device_type(device_type: ffi::cl_device_type) -> bool {
+    pub fn is_valid_device_type(device_type: sys::cl_device_type) -> bool {
         let known = consts::CL_DEVICE_TYPE_DEFAULT
             | consts::CL_DEVICE_TYPE_CPU
             | consts::CL_DEVICE_TYPE_GPU
@@ -58,7 +58,7 @@ impl VoddPlatform {
         device_type == consts::CL_DEVICE_TYPE_ALL || (device_type != 0 && device_type & !known == 0)
     }
 
-    pub fn platform_info(param_name: ffi::cl_platform_info) -> Option<&'static [u8]> {
+    pub fn platform_info(param_name: sys::cl_platform_info) -> Option<&'static [u8]> {
         let text: &'static [u8] = match param_name {
             consts::CL_PLATFORM_PROFILE => b"EMBEDDED_PROFILE\0",
             consts::CL_PLATFORM_VERSION => b"OpenCL 1.2 vodd\0",
@@ -71,7 +71,7 @@ impl VoddPlatform {
         Some(text)
     }
 
-    pub fn device_info(param_name: ffi::cl_device_info) -> Option<InfoValue<'static>> {
+    pub fn device_info(param_name: sys::cl_device_info) -> Option<InfoValue<'static>> {
         let value = match param_name {
             consts::CL_DEVICE_TYPE => InfoValue::Ulong(VODD_DEVICE_TYPE),
             consts::CL_DEVICE_VENDOR_ID => InfoValue::Uint(0),
@@ -160,20 +160,20 @@ impl VoddPlatform {
 unsafe impl Send for VoddContext {}
 
 pub struct VoddContext {
-    reference_count: ffi::cl_uint,
-    devices: Vec<ffi::cl_device_id>,
-    properties: Vec<ffi::cl_context_properties>,
-    notify: Option<ffi::cl_context_callback>,
+    reference_count: sys::cl_uint,
+    devices: Vec<sys::cl_device_id>,
+    properties: Vec<sys::cl_context_properties>,
+    notify: Option<sys::cl_context_callback>,
     user_data: *mut core::ffi::c_void,
 }
 
 impl VoddContext {
     pub fn create(
-        properties: Vec<ffi::cl_context_properties>,
-        devices: Vec<ffi::cl_device_id>,
-        notify: Option<ffi::cl_context_callback>,
+        properties: Vec<sys::cl_context_properties>,
+        devices: Vec<sys::cl_device_id>,
+        notify: Option<sys::cl_context_callback>,
         user_data: *mut core::ffi::c_void,
-    ) -> ffi::cl_uint {
+    ) -> sys::cl_uint {
         let id = next_object_id();
 
         CONTEXTS.lock().expect("contexts").insert(
@@ -184,7 +184,7 @@ impl VoddContext {
         id
     }
 
-    pub fn retain(id: ffi::cl_uint) -> bool {
+    pub fn retain(id: sys::cl_uint) -> bool {
         CONTEXTS
             .lock()
             .expect("contexts")
@@ -193,7 +193,7 @@ impl VoddContext {
             .is_some()
     }
 
-    pub fn release(id: ffi::cl_uint) -> Option<bool> {
+    pub fn release(id: sys::cl_uint) -> Option<bool> {
         let mut contexts = CONTEXTS.lock().expect("contexts");
         let context = contexts.get_mut(&id)?;
 
@@ -207,19 +207,19 @@ impl VoddContext {
         Some(false)
     }
 
-    pub fn with<T>(id: ffi::cl_uint, action: impl FnOnce(&VoddContext) -> T) -> Option<T> {
+    pub fn with<T>(id: sys::cl_uint, action: impl FnOnce(&VoddContext) -> T) -> Option<T> {
         CONTEXTS.lock().expect("contexts").get(&id).map(action)
     }
 
-    pub fn has_device(&self, device: ffi::cl_device_id) -> bool {
+    pub fn has_device(&self, device: sys::cl_device_id) -> bool {
         self.devices.contains(&device)
     }
 
-    pub fn info(&self, param_name: ffi::cl_context_info) -> Option<InfoValue<'_>> {
+    pub fn info(&self, param_name: sys::cl_context_info) -> Option<InfoValue<'_>> {
         match param_name {
             consts::CL_CONTEXT_REFERENCE_COUNT => Some(InfoValue::Uint(self.reference_count)),
             consts::CL_CONTEXT_NUM_DEVICES => {
-                Some(InfoValue::Uint(self.devices.len() as ffi::cl_uint))
+                Some(InfoValue::Uint(self.devices.len() as sys::cl_uint))
             }
             consts::CL_CONTEXT_DEVICES => Some(InfoValue::Handles(&self.devices)),
             consts::CL_CONTEXT_PROPERTIES => Some(InfoValue::Properties(&self.properties)),
@@ -228,8 +228,8 @@ impl VoddContext {
     }
 
     pub fn validate_properties(
-        properties: &[ffi::cl_context_properties],
-    ) -> Result<(), ffi::cl_int> {
+        properties: &[sys::cl_context_properties],
+    ) -> Result<(), sys::cl_int> {
         let listed = properties.strip_suffix(&[0]).unwrap_or(properties);
         let mut pairs = listed.chunks_exact(2);
 
@@ -237,7 +237,7 @@ impl VoddContext {
             return Err(consts::CL_INVALID_PROPERTY);
         }
 
-        let named: Vec<ffi::cl_context_properties> = pairs.clone().map(|pair| pair[0]).collect();
+        let named: Vec<sys::cl_context_properties> = pairs.clone().map(|pair| pair[0]).collect();
 
         if named
             .iter()
@@ -251,17 +251,17 @@ impl VoddContext {
     }
 
     fn validate_property(
-        name: ffi::cl_context_properties,
-        value: ffi::cl_context_properties,
-    ) -> Result<(), ffi::cl_int> {
+        name: sys::cl_context_properties,
+        value: sys::cl_context_properties,
+    ) -> Result<(), sys::cl_int> {
         match name {
             consts::CL_CONTEXT_PLATFORM => {
-                VoddPlatform::is_platform_id(value as ffi::cl_platform_id)
+                VoddPlatform::is_platform_id(value as sys::cl_platform_id)
                     .then_some(())
                     .ok_or(consts::CL_INVALID_PLATFORM)
             }
             consts::CL_CONTEXT_INTEROP_USER_SYNC => {
-                matches!(value as ffi::cl_bool, consts::CL_FALSE | consts::CL_TRUE)
+                matches!(value as sys::cl_bool, consts::CL_FALSE | consts::CL_TRUE)
                     .then_some(())
                     .ok_or(consts::CL_INVALID_PROPERTY)
             }
@@ -270,9 +270,9 @@ impl VoddContext {
     }
 
     pub fn select_devices(
-        devices: &[ffi::cl_device_id],
-    ) -> Result<Vec<ffi::cl_device_id>, ffi::cl_int> {
-        let mut selected: Vec<ffi::cl_device_id> = Vec::new();
+        devices: &[sys::cl_device_id],
+    ) -> Result<Vec<sys::cl_device_id>, sys::cl_int> {
+        let mut selected: Vec<sys::cl_device_id> = Vec::new();
 
         for device in devices {
             if !VoddPlatform::is_device_id(*device) {
@@ -287,7 +287,7 @@ impl VoddContext {
         Ok(selected)
     }
 
-    pub fn devices_of_type(device_type: ffi::cl_device_type) -> Vec<ffi::cl_device_id> {
+    pub fn devices_of_type(device_type: sys::cl_device_type) -> Vec<sys::cl_device_id> {
         if VoddPlatform::is_valid_device_type(device_type)
             && (device_type & VODD_DEVICE_TYPE != 0
                 || device_type == consts::CL_DEVICE_TYPE_DEFAULT)
@@ -310,19 +310,19 @@ pub struct Command {}
 unsafe impl Send for VoddCommandQueue {}
 
 pub struct VoddCommandQueue {
-    reference_count: ffi::cl_uint,
-    context: ffi::cl_context,
-    device: ffi::cl_device_id,
-    properties: ffi::cl_command_queue_properties,
+    reference_count: sys::cl_uint,
+    context: sys::cl_context,
+    device: sys::cl_device_id,
+    properties: sys::cl_command_queue_properties,
     commands: VecDeque<Command>,
 }
 
 impl VoddCommandQueue {
     pub fn create(
-        context: ffi::cl_context,
-        device: ffi::cl_device_id,
-        properties: ffi::cl_command_queue_properties,
-    ) -> ffi::cl_uint {
+        context: sys::cl_context,
+        device: sys::cl_device_id,
+        properties: sys::cl_command_queue_properties,
+    ) -> sys::cl_uint {
         let id = next_object_id();
 
         QUEUES.lock().expect("queues").insert(
@@ -339,7 +339,7 @@ impl VoddCommandQueue {
         id
     }
 
-    pub fn retain(id: ffi::cl_uint) -> bool {
+    pub fn retain(id: sys::cl_uint) -> bool {
         QUEUES
             .lock()
             .expect("queues")
@@ -348,7 +348,7 @@ impl VoddCommandQueue {
             .is_some()
     }
 
-    pub fn release(id: ffi::cl_uint) -> Option<Option<ffi::cl_context>> {
+    pub fn release(id: sys::cl_uint) -> Option<Option<sys::cl_context>> {
         let mut queues = QUEUES.lock().expect("queues");
         let queue = queues.get_mut(&id)?;
 
@@ -364,11 +364,11 @@ impl VoddCommandQueue {
         Some(None)
     }
 
-    pub fn with<T>(id: ffi::cl_uint, action: impl FnOnce(&VoddCommandQueue) -> T) -> Option<T> {
+    pub fn with<T>(id: sys::cl_uint, action: impl FnOnce(&VoddCommandQueue) -> T) -> Option<T> {
         QUEUES.lock().expect("queues").get(&id).map(action)
     }
 
-    pub fn push(id: ffi::cl_uint, command: Command) -> bool {
+    pub fn push(id: sys::cl_uint, command: Command) -> bool {
         QUEUES
             .lock()
             .expect("queues")
@@ -377,7 +377,7 @@ impl VoddCommandQueue {
             .is_some()
     }
 
-    pub fn pop(id: ffi::cl_uint) -> Option<Command> {
+    pub fn pop(id: sys::cl_uint) -> Option<Command> {
         QUEUES
             .lock()
             .expect("queues")
@@ -387,8 +387,8 @@ impl VoddCommandQueue {
     }
 
     pub fn validate_properties(
-        properties: ffi::cl_command_queue_properties,
-    ) -> Result<(), ffi::cl_int> {
+        properties: sys::cl_command_queue_properties,
+    ) -> Result<(), sys::cl_int> {
         let known =
             consts::CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | consts::CL_QUEUE_PROFILING_ENABLE;
 
@@ -409,7 +409,7 @@ impl VoddCommandQueue {
         Ok(())
     }
 
-    pub fn info(&self, param_name: ffi::cl_command_queue_info) -> Option<InfoValue<'_>> {
+    pub fn info(&self, param_name: sys::cl_command_queue_info) -> Option<InfoValue<'_>> {
         match param_name {
             consts::CL_QUEUE_CONTEXT => Some(InfoValue::Handle(self.context.cast())),
             consts::CL_QUEUE_DEVICE => Some(InfoValue::Handle(self.device.cast())),
@@ -417,5 +417,53 @@ impl VoddCommandQueue {
             consts::CL_QUEUE_PROPERTIES => Some(InfoValue::Ulong(self.properties)),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn queue() -> sys::cl_uint {
+        VoddCommandQueue::create(core::ptr::null_mut(), VoddPlatform::device_id(), 0)
+    }
+
+    #[test]
+    fn commands_are_pushed_and_popped() {
+        let id = queue();
+
+        assert!(VoddCommandQueue::pop(id).is_none());
+        assert!(VoddCommandQueue::push(id, Command {}));
+        assert!(VoddCommandQueue::push(id, Command {}));
+        assert!(VoddCommandQueue::pop(id).is_some());
+        assert!(VoddCommandQueue::pop(id).is_some());
+        assert!(VoddCommandQueue::pop(id).is_none());
+    }
+
+    #[test]
+    fn pushing_to_an_unknown_queue_fails() {
+        assert!(!VoddCommandQueue::push(0, Command {}));
+        assert!(VoddCommandQueue::pop(0).is_none());
+    }
+
+    #[test]
+    fn commands_survive_concurrent_pushes() {
+        let id = queue();
+        let threads = 8;
+        let per_thread = 2000;
+
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| {
+                    for _ in 0..per_thread {
+                        assert!(VoddCommandQueue::push(id, Command {}));
+                    }
+                });
+            }
+        });
+
+        let popped = core::iter::from_fn(|| VoddCommandQueue::pop(id)).count();
+
+        assert_eq!(popped, threads * per_thread);
     }
 }
