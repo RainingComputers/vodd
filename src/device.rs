@@ -46,11 +46,11 @@ impl VoddDevice {
 
     pub fn platform_info(param_name: ffi::cl_platform_info) -> Option<&'static [u8]> {
         let text: &'static [u8] = match param_name {
-            consts::CL_PLATFORM_PROFILE => b"FULL_PROFILE\0",
+            consts::CL_PLATFORM_PROFILE => b"EMBEDDED_PROFILE\0",
             consts::CL_PLATFORM_VERSION => b"OpenCL 1.2 vodd\0",
             consts::CL_PLATFORM_NAME => b"vodd\0",
             consts::CL_PLATFORM_VENDOR => b"vodd\0",
-            consts::CL_PLATFORM_EXTENSIONS => b"\0",
+            consts::CL_PLATFORM_EXTENSIONS => b"cles_khr_int64\0",
             _ => return None,
         };
 
@@ -131,10 +131,10 @@ impl VoddDevice {
             consts::CL_DEVICE_NAME => InfoValue::Text(b"vodd\0"),
             consts::CL_DEVICE_VENDOR => InfoValue::Text(b"vodd\0"),
             consts::CL_DRIVER_VERSION => InfoValue::Text(b"0.0.1\0"),
-            consts::CL_DEVICE_PROFILE => InfoValue::Text(b"FULL_PROFILE\0"),
+            consts::CL_DEVICE_PROFILE => InfoValue::Text(b"EMBEDDED_PROFILE\0"),
             consts::CL_DEVICE_VERSION => InfoValue::Text(b"OpenCL 1.2 vodd\0"),
             consts::CL_DEVICE_OPENCL_C_VERSION => InfoValue::Text(b"OpenCL C 1.2 \0"),
-            consts::CL_DEVICE_EXTENSIONS => InfoValue::Text(b"\0"),
+            consts::CL_DEVICE_EXTENSIONS => InfoValue::Text(b"cles_khr_int64\0"),
             consts::CL_DEVICE_BUILT_IN_KERNELS => InfoValue::Text(b"\0"),
             _ => return None,
         };

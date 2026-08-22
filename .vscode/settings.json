@@ -1,5 +1,6 @@
 {
     "cSpell.words": [
+        "badvalue",
         "bitcode",
         "bitfield",
         "CACHELINE",
@@ -7,6 +8,7 @@
         "errcode",
         "memobj",
         "nonoverlapping",
+        "pocl",
         "pointee",
         "signedness",
         "signum",

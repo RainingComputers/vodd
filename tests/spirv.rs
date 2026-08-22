@@ -107,7 +107,7 @@ fn spirv_cases() {
 }
 
 fn run_spirv_case(spirv_case: &SpirvCase, drive: Driver<'_>) -> Result<Vec<u8>, String> {
-    let binary = assemble(&spirv_case.assembly);
+    let binary = assemble(&spirv_case.assembly)?;
     let module = parser::parse(&binary).map_err(|error| format!("parse: {error:?}"))?;
     let function = module
         .entry(&spirv_case.entry)
@@ -148,7 +148,7 @@ fn driver_with_yields_expect(
 
     while let Some(reason) = interpreter
         .resume(reply)
-        .map_err(|error| format!("{error:?}"))?
+        .map_err(|error| format!("resume: {error:?}"))?
     {
         if watched.contains(&std::mem::discriminant(&reason)) {
             yields.push(reason.clone());
@@ -175,7 +175,7 @@ fn driver(
 
     while let Some(reason) = interpreter
         .resume(reply)
-        .map_err(|error| format!("{error:?}"))?
+        .map_err(|error| format!("resume: {error:?}"))?
     {
         reply = driver_inner(reason, buffers, global_id)?;
     }
@@ -439,30 +439,35 @@ fn ulp_distance(one: u32, other: u32) -> u64 {
     (order(one) - order(other)).unsigned_abs()
 }
 
-fn assemble(assembly: &str) -> Vec<u8> {
+fn assemble(assembly: &str) -> Result<Vec<u8>, String> {
     let mut child = Command::new("spirv-as")
         .args(["--target-env", "opencl1.2", "-", "-o", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spirv-as must be installed and on PATH");
+        .unwrap_or_else(|error| panic!("spirv-as must be installed and on PATH: {error}"));
 
-    child
+    let written = child
         .stdin
         .as_mut()
-        .expect("stdin")
-        .write_all(assembly.as_bytes())
-        .expect("write assembly");
+        .expect("stdin is piped")
+        .write_all(assembly.as_bytes());
 
-    let output = child.wait_with_output().expect("spirv-as");
-    assert!(
-        output.status.success(),
-        "spirv-as failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("assemble: waiting for spirv-as: {error}"))?;
 
-    output.stdout
+    written.map_err(|error| format!("assemble: writing to spirv-as: {error}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "assemble: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(output.stdout)
 }
 
 fn decode_base85(text: &str) -> Vec<u8> {
