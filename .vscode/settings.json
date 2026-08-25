@@ -5,6 +5,7 @@
         "bitfield",
         "CACHELINE",
         "componentwise",
+        "Condvar",
         "Deque",
         "errcode",
         "errinfo",

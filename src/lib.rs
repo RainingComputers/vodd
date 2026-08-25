@@ -19,27 +19,14 @@ pub unsafe extern "C" fn clGetPlatformIDs(
     platforms: *mut sys::cl_platform_id,
     num_platforms: *mut sys::cl_uint,
 ) -> sys::cl_int {
-    if platforms.is_null() && num_platforms.is_null() {
-        return consts::CL_INVALID_VALUE;
+    unsafe {
+        ffi::write_handles(
+            &[ffi::platform_handle()],
+            num_entries,
+            platforms,
+            num_platforms,
+        )
     }
-
-    if !platforms.is_null() && num_entries == 0 {
-        return consts::CL_INVALID_VALUE;
-    }
-
-    if !platforms.is_null() {
-        unsafe {
-            *platforms = platform::VoddPlatform::platform_id();
-        }
-    }
-
-    if !num_platforms.is_null() {
-        unsafe {
-            *num_platforms = 1;
-        }
-    }
-
-    consts::CL_SUCCESS
 }
 
 #[unsafe(no_mangle)]
@@ -50,15 +37,16 @@ pub unsafe extern "C" fn clGetPlatformInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> sys::cl_int {
-    if !platform.is_null() && !platform::VoddPlatform::is_platform_id(platform) {
-        return consts::CL_INVALID_PLATFORM;
+    unsafe {
+        ffi::info(
+            ffi::platform_id(platform)
+                .and_then(|()| ffi::platform_info(param_name))
+                .map(platform::Platform::info),
+            param_value_size,
+            param_value,
+            param_value_size_ret,
+        )
     }
-
-    let Some(text) = platform::VoddPlatform::platform_info(param_name) else {
-        return consts::CL_INVALID_VALUE;
-    };
-
-    unsafe { ffi::info_bytes(text, param_value_size, param_value, param_value_size_ret) }
 }
 
 #[unsafe(no_mangle)]
@@ -69,35 +57,16 @@ pub unsafe extern "C" fn clGetDeviceIDs(
     devices: *mut sys::cl_device_id,
     num_devices: *mut sys::cl_uint,
 ) -> sys::cl_int {
-    if !platform.is_null() && !platform::VoddPlatform::is_platform_id(platform) {
-        return consts::CL_INVALID_PLATFORM;
+    unsafe {
+        ffi::found(
+            ffi::platform_id(platform)
+                .and_then(|()| ffi::device_type(device_type))
+                .and_then(platform::Platform::devices),
+            num_entries,
+            devices,
+            num_devices,
+        )
     }
-
-    if devices.is_null() && num_devices.is_null() {
-        return consts::CL_INVALID_VALUE;
-    }
-
-    if !devices.is_null() && num_entries == 0 {
-        return consts::CL_INVALID_VALUE;
-    }
-
-    if !platform::VoddPlatform::is_valid_device_type(device_type) {
-        return consts::CL_INVALID_DEVICE_TYPE;
-    }
-
-    if !devices.is_null() {
-        unsafe {
-            *devices = platform::VoddPlatform::device_id();
-        }
-    }
-
-    if !num_devices.is_null() {
-        unsafe {
-            *num_devices = 1;
-        }
-    }
-
-    consts::CL_SUCCESS
 }
 
 #[unsafe(no_mangle)]
@@ -108,15 +77,14 @@ pub unsafe extern "C" fn clGetDeviceInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> sys::cl_int {
-    if !platform::VoddPlatform::is_device_id(device) {
-        return consts::CL_INVALID_DEVICE;
+    unsafe {
+        ffi::info(
+            ffi::device(device).and_then(|device| Ok(device.info(ffi::device_info(param_name)?))),
+            param_value_size,
+            param_value,
+            param_value_size_ret,
+        )
     }
-
-    let Some(value) = platform::VoddPlatform::device_info(param_name) else {
-        return consts::CL_INVALID_VALUE;
-    };
-
-    unsafe { ffi::info_value(value, param_value_size, param_value, param_value_size_ret) }
 }
 
 #[unsafe(no_mangle)]
@@ -127,29 +95,17 @@ pub unsafe extern "C" fn clCreateSubDevices(
     out_devices: *mut sys::cl_device_id,
     num_devices_ret: *mut sys::cl_uint,
 ) -> sys::cl_int {
-    if !platform::VoddPlatform::is_device_id(in_device) {
-        return consts::CL_INVALID_DEVICE;
-    }
-
-    consts::CL_INVALID_VALUE
+    ffi::status(ffi::device(in_device).and(Err(platform::Error::InvalidValue)))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clRetainDevice(device: sys::cl_device_id) -> sys::cl_int {
-    if !platform::VoddPlatform::is_device_id(device) {
-        return consts::CL_INVALID_DEVICE;
-    }
-
-    consts::CL_SUCCESS
+    ffi::status(ffi::device(device).map(|_| ()))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clReleaseDevice(device: sys::cl_device_id) -> sys::cl_int {
-    if !platform::VoddPlatform::is_device_id(device) {
-        return consts::CL_INVALID_DEVICE;
-    }
-
-    consts::CL_SUCCESS
+    ffi::status(ffi::device(device).map(|_| ()))
 }
 
 #[unsafe(no_mangle)]
@@ -161,18 +117,19 @@ pub unsafe extern "C" fn clCreateContext(
     user_data: *mut core::ffi::c_void,
     errcode_ret: *mut sys::cl_int,
 ) -> sys::cl_context {
-    if devices.is_null() || num_devices == 0 {
-        return unsafe { ffi::context_error(consts::CL_INVALID_VALUE, errcode_ret) };
+    unsafe {
+        ffi::object(
+            (|| {
+                platform::Context::create(
+                    ffi::context_properties(properties)?,
+                    ffi::devices(num_devices, devices)?,
+                    ffi::context_notify(pfn_notify, user_data)?,
+                )
+                .map(platform::ContextId::into_raw)
+            })(),
+            errcode_ret,
+        )
     }
-
-    let requested = unsafe { core::slice::from_raw_parts(devices, num_devices as usize) };
-
-    let selected = match platform::VoddContext::select_devices(requested) {
-        Ok(selected) => selected,
-        Err(error) => return unsafe { ffi::context_error(error, errcode_ret) },
-    };
-
-    unsafe { ffi::create_context(properties, selected, pfn_notify, user_data, errcode_ret) }
 }
 
 #[unsafe(no_mangle)]
@@ -183,34 +140,29 @@ pub unsafe extern "C" fn clCreateContextFromType(
     user_data: *mut core::ffi::c_void,
     errcode_ret: *mut sys::cl_int,
 ) -> sys::cl_context {
-    if !platform::VoddPlatform::is_valid_device_type(device_type) {
-        return unsafe { ffi::context_error(consts::CL_INVALID_DEVICE_TYPE, errcode_ret) };
+    unsafe {
+        ffi::object(
+            (|| {
+                platform::Context::create(
+                    ffi::context_properties(properties)?,
+                    platform::Platform::devices(ffi::device_type(device_type)?)?,
+                    ffi::context_notify(pfn_notify, user_data)?,
+                )
+                .map(platform::ContextId::into_raw)
+            })(),
+            errcode_ret,
+        )
     }
-
-    let selected = platform::VoddContext::devices_of_type(device_type);
-    if selected.is_empty() {
-        return unsafe { ffi::context_error(consts::CL_DEVICE_NOT_FOUND, errcode_ret) };
-    }
-
-    unsafe { ffi::create_context(properties, selected, pfn_notify, user_data, errcode_ret) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clRetainContext(context: sys::cl_context) -> sys::cl_int {
-    if !platform::VoddContext::retain(ffi::object_id(context)) {
-        return consts::CL_INVALID_CONTEXT;
-    }
-
-    consts::CL_SUCCESS
+    ffi::status(platform::Context::retain(ffi::context_id(context)))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clReleaseContext(context: sys::cl_context) -> sys::cl_int {
-    if platform::VoddContext::release(ffi::object_id(context)).is_none() {
-        return consts::CL_INVALID_CONTEXT;
-    }
-
-    consts::CL_SUCCESS
+    ffi::status(platform::Context::release(ffi::context_id(context)))
 }
 
 #[unsafe(no_mangle)]
@@ -221,41 +173,29 @@ pub unsafe extern "C" fn clGetContextInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> sys::cl_int {
-    let queried = platform::VoddContext::with(ffi::object_id(context), |context| {
-        let value = context.info(param_name)?;
-
-        Some(unsafe { ffi::info_value(value, param_value_size, param_value, param_value_size_ret) })
-    });
-
-    match queried {
-        None => consts::CL_INVALID_CONTEXT,
-        Some(None) => consts::CL_INVALID_VALUE,
-        Some(Some(error)) => error,
+    unsafe {
+        ffi::info(
+            ffi::context_info(param_name)
+                .and_then(|param| platform::Context::info(ffi::context_id(context), param)),
+            param_value_size,
+            param_value,
+            param_value_size_ret,
+        )
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clRetainCommandQueue(command_queue: sys::cl_command_queue) -> sys::cl_int {
-    if !platform::VoddCommandQueue::retain(ffi::object_id(command_queue)) {
-        return consts::CL_INVALID_COMMAND_QUEUE;
-    }
-
-    consts::CL_SUCCESS
+    ffi::status(platform::CommandQueue::retain(ffi::queue_id(command_queue)))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clReleaseCommandQueue(
     command_queue: sys::cl_command_queue,
 ) -> sys::cl_int {
-    let Some(released) = platform::VoddCommandQueue::release(ffi::object_id(command_queue)) else {
-        return consts::CL_INVALID_COMMAND_QUEUE;
-    };
-
-    if let Some(context) = released {
-        platform::VoddContext::release(ffi::object_id(context));
-    }
-
-    consts::CL_SUCCESS
+    ffi::status(platform::CommandQueue::release(ffi::queue_id(
+        command_queue,
+    )))
 }
 
 #[unsafe(no_mangle)]
@@ -266,16 +206,15 @@ pub unsafe extern "C" fn clGetCommandQueueInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> sys::cl_int {
-    let queried = platform::VoddCommandQueue::with(ffi::object_id(command_queue), |queue| {
-        let value = queue.info(param_name)?;
-
-        Some(unsafe { ffi::info_value(value, param_value_size, param_value, param_value_size_ret) })
-    });
-
-    match queried {
-        None => consts::CL_INVALID_COMMAND_QUEUE,
-        Some(None) => consts::CL_INVALID_VALUE,
-        Some(Some(error)) => error,
+    unsafe {
+        ffi::info(
+            ffi::queue_info(param_name).and_then(|param| {
+                platform::CommandQueue::info(ffi::queue_id(command_queue), param)
+            }),
+            param_value_size,
+            param_value,
+            param_value_size_ret,
+        )
     }
 }
 
@@ -287,7 +226,19 @@ pub unsafe extern "C" fn clCreateBuffer(
     host_ptr: *mut core::ffi::c_void,
     errcode_ret: *mut sys::cl_int,
 ) -> sys::cl_mem {
-    panic!("clCreateBuffer is not implemented");
+    unsafe {
+        ffi::object(
+            (|| {
+                platform::Buffer::create(
+                    ffi::context_id(context),
+                    ffi::mem_flags(flags, host_ptr)?,
+                    size,
+                )
+                .map(platform::BufferId::into_raw)
+            })(),
+            errcode_ret,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -298,7 +249,22 @@ pub unsafe extern "C" fn clCreateSubBuffer(
     buffer_create_info: *const core::ffi::c_void,
     errcode_ret: *mut sys::cl_int,
 ) -> sys::cl_mem {
-    panic!("clCreateSubBuffer is not implemented");
+    unsafe {
+        ffi::object(
+            (|| {
+                let region = ffi::buffer_region(buffer_create_type, buffer_create_info)?;
+
+                platform::Buffer::create_sub(
+                    ffi::buffer_id(buffer),
+                    ffi::mem_flags(flags, core::ptr::null_mut())?,
+                    region.origin,
+                    region.size,
+                )
+                .map(platform::BufferId::into_raw)
+            })(),
+            errcode_ret,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -315,12 +281,12 @@ pub unsafe extern "C" fn clCreateImage(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clRetainMemObject(memobj: sys::cl_mem) -> sys::cl_int {
-    panic!("clRetainMemObject is not implemented");
+    ffi::status(platform::Buffer::retain(ffi::buffer_id(memobj)))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clReleaseMemObject(memobj: sys::cl_mem) -> sys::cl_int {
-    panic!("clReleaseMemObject is not implemented");
+    ffi::status(platform::Buffer::release(ffi::buffer_id(memobj)))
 }
 
 #[unsafe(no_mangle)]
@@ -343,7 +309,15 @@ pub unsafe extern "C" fn clGetMemObjectInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> sys::cl_int {
-    panic!("clGetMemObjectInfo is not implemented");
+    unsafe {
+        ffi::info(
+            ffi::mem_info(param_name)
+                .and_then(|param| platform::Buffer::info(ffi::buffer_id(memobj), param)),
+            param_value_size,
+            param_value,
+            param_value_size_ret,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -360,10 +334,13 @@ pub unsafe extern "C" fn clGetImageInfo(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clSetMemObjectDestructorCallback(
     memobj: sys::cl_mem,
-    pfn_notify: Option<unsafe extern "C" fn(sys::cl_mem, *mut core::ffi::c_void)>,
+    pfn_notify: Option<sys::cl_mem_destructor_callback>,
     user_data: *mut core::ffi::c_void,
 ) -> sys::cl_int {
-    panic!("clSetMemObjectDestructorCallback is not implemented");
+    ffi::status(unsafe {
+        ffi::destructor_notify(pfn_notify, user_data)
+            .and_then(|notify| platform::Buffer::add_destructor(ffi::buffer_id(memobj), notify))
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -581,7 +558,9 @@ pub unsafe extern "C" fn clWaitForEvents(
     num_events: sys::cl_uint,
     event_list: *const sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clWaitForEvents is not implemented");
+    ffi::status(unsafe {
+        ffi::events(num_events, event_list).and_then(|events| platform::Event::wait(&events))
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -592,7 +571,15 @@ pub unsafe extern "C" fn clGetEventInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> sys::cl_int {
-    panic!("clGetEventInfo is not implemented");
+    unsafe {
+        ffi::info(
+            ffi::event_info(param_name)
+                .and_then(|param| platform::Event::info(ffi::event_id(event), param)),
+            param_value_size,
+            param_value,
+            param_value_size_ret,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -600,17 +587,22 @@ pub unsafe extern "C" fn clCreateUserEvent(
     context: sys::cl_context,
     errcode_ret: *mut sys::cl_int,
 ) -> sys::cl_event {
-    panic!("clCreateUserEvent is not implemented");
+    unsafe {
+        ffi::object(
+            platform::Event::create_user(ffi::context_id(context)).map(platform::EventId::into_raw),
+            errcode_ret,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clRetainEvent(event: sys::cl_event) -> sys::cl_int {
-    panic!("clRetainEvent is not implemented");
+    ffi::status(platform::Event::retain(ffi::event_id(event)))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clReleaseEvent(event: sys::cl_event) -> sys::cl_int {
-    panic!("clReleaseEvent is not implemented");
+    ffi::status(platform::Event::release(ffi::event_id(event)))
 }
 
 #[unsafe(no_mangle)]
@@ -618,17 +610,26 @@ pub unsafe extern "C" fn clSetUserEventStatus(
     event: sys::cl_event,
     execution_status: sys::cl_int,
 ) -> sys::cl_int {
-    panic!("clSetUserEventStatus is not implemented");
+    ffi::status(
+        ffi::user_status(execution_status)
+            .and_then(|status| platform::Event::set_user_status(ffi::event_id(event), status)),
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clSetEventCallback(
     event: sys::cl_event,
     command_exec_callback_type: sys::cl_int,
-    pfn_notify: Option<unsafe extern "C" fn(sys::cl_event, sys::cl_int, *mut core::ffi::c_void)>,
+    pfn_notify: Option<sys::cl_event_callback>,
     user_data: *mut core::ffi::c_void,
 ) -> sys::cl_int {
-    panic!("clSetEventCallback is not implemented");
+    ffi::status((|| unsafe {
+        platform::Event::add_callback(
+            ffi::event_id(event),
+            ffi::callback_status(command_exec_callback_type)?,
+            ffi::event_notify(pfn_notify, user_data)?,
+        )
+    })())
 }
 
 #[unsafe(no_mangle)]
@@ -644,12 +645,12 @@ pub unsafe extern "C" fn clGetEventProfilingInfo(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clFlush(command_queue: sys::cl_command_queue) -> sys::cl_int {
-    panic!("clFlush is not implemented");
+    ffi::status(platform::CommandQueue::flush(ffi::queue_id(command_queue)))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clFinish(command_queue: sys::cl_command_queue) -> sys::cl_int {
-    panic!("clFinish is not implemented");
+    ffi::status(platform::CommandQueue::finish(ffi::queue_id(command_queue)))
 }
 
 #[unsafe(no_mangle)]
@@ -664,7 +665,18 @@ pub unsafe extern "C" fn clEnqueueReadBuffer(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueReadBuffer is not implemented");
+    unsafe {
+        ffi::enqueue(blocking_read, event, || {
+            platform::CommandQueue::read_buffer(
+                ffi::queue_id(command_queue),
+                ffi::buffer_id(buffer),
+                offset,
+                size,
+                ffi::host_pointer(ptr),
+                ffi::event_wait_list(num_events_in_wait_list, event_wait_list)?,
+            )
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -684,7 +696,28 @@ pub unsafe extern "C" fn clEnqueueReadBufferRect(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueReadBufferRect is not implemented");
+    unsafe {
+        ffi::enqueue(blocking_read, event, || {
+            platform::CommandQueue::transfer(
+                ffi::queue_id(command_queue),
+                platform::Slab::rect(
+                    platform::Target::Buffer(ffi::buffer_id(buffer)),
+                    ffi::region(buffer_origin)?,
+                    buffer_row_pitch,
+                    buffer_slice_pitch,
+                ),
+                platform::Slab::rect(
+                    platform::Target::Host(ffi::host_pointer(ptr)),
+                    ffi::region(host_origin)?,
+                    host_row_pitch,
+                    host_slice_pitch,
+                ),
+                ffi::region(region)?,
+                platform::CommandType::ReadBufferRect,
+                ffi::event_wait_list(num_events_in_wait_list, event_wait_list)?,
+            )
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -699,7 +732,18 @@ pub unsafe extern "C" fn clEnqueueWriteBuffer(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueWriteBuffer is not implemented");
+    unsafe {
+        ffi::enqueue(blocking_write, event, || {
+            platform::CommandQueue::write_buffer(
+                ffi::queue_id(command_queue),
+                ffi::buffer_id(buffer),
+                offset,
+                size,
+                ffi::host_pointer(ptr),
+                ffi::event_wait_list(num_events_in_wait_list, event_wait_list)?,
+            )
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -719,7 +763,28 @@ pub unsafe extern "C" fn clEnqueueWriteBufferRect(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueWriteBufferRect is not implemented");
+    unsafe {
+        ffi::enqueue(blocking_write, event, || {
+            platform::CommandQueue::transfer(
+                ffi::queue_id(command_queue),
+                platform::Slab::rect(
+                    platform::Target::Host(ffi::host_pointer(ptr)),
+                    ffi::region(host_origin)?,
+                    host_row_pitch,
+                    host_slice_pitch,
+                ),
+                platform::Slab::rect(
+                    platform::Target::Buffer(ffi::buffer_id(buffer)),
+                    ffi::region(buffer_origin)?,
+                    buffer_row_pitch,
+                    buffer_slice_pitch,
+                ),
+                ffi::region(region)?,
+                platform::CommandType::WriteBufferRect,
+                ffi::event_wait_list(num_events_in_wait_list, event_wait_list)?,
+            )
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -734,7 +799,18 @@ pub unsafe extern "C" fn clEnqueueFillBuffer(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueFillBuffer is not implemented");
+    unsafe {
+        ffi::enqueue(consts::CL_FALSE, event, || {
+            platform::CommandQueue::fill_buffer(
+                ffi::queue_id(command_queue),
+                ffi::buffer_id(buffer),
+                offset,
+                size,
+                ffi::pattern(pattern, pattern_size)?,
+                ffi::event_wait_list(num_events_in_wait_list, event_wait_list)?,
+            )
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -749,7 +825,19 @@ pub unsafe extern "C" fn clEnqueueCopyBuffer(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueCopyBuffer is not implemented");
+    unsafe {
+        ffi::enqueue(consts::CL_FALSE, event, || {
+            platform::CommandQueue::copy_buffer(
+                ffi::queue_id(command_queue),
+                ffi::buffer_id(src_buffer),
+                src_offset,
+                ffi::buffer_id(dst_buffer),
+                dst_offset,
+                size,
+                ffi::event_wait_list(num_events_in_wait_list, event_wait_list)?,
+            )
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -768,7 +856,28 @@ pub unsafe extern "C" fn clEnqueueCopyBufferRect(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueCopyBufferRect is not implemented");
+    unsafe {
+        ffi::enqueue(consts::CL_FALSE, event, || {
+            platform::CommandQueue::transfer(
+                ffi::queue_id(command_queue),
+                platform::Slab::rect(
+                    platform::Target::Buffer(ffi::buffer_id(src_buffer)),
+                    ffi::region(src_origin)?,
+                    src_row_pitch,
+                    src_slice_pitch,
+                ),
+                platform::Slab::rect(
+                    platform::Target::Buffer(ffi::buffer_id(dst_buffer)),
+                    ffi::region(dst_origin)?,
+                    dst_row_pitch,
+                    dst_slice_pitch,
+                ),
+                ffi::region(region)?,
+                platform::CommandType::CopyBufferRect,
+                ffi::event_wait_list(num_events_in_wait_list, event_wait_list)?,
+            )
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -877,7 +986,18 @@ pub unsafe extern "C" fn clEnqueueMapBuffer(
     event: *mut sys::cl_event,
     errcode_ret: *mut sys::cl_int,
 ) -> *mut core::ffi::c_void {
-    panic!("clEnqueueMapBuffer is not implemented");
+    unsafe {
+        ffi::map(blocking_map, event, errcode_ret, || {
+            platform::CommandQueue::map_buffer(
+                ffi::queue_id(command_queue),
+                ffi::buffer_id(buffer),
+                offset,
+                size,
+                ffi::map_flags(map_flags)?,
+                ffi::event_wait_list(num_events_in_wait_list, event_wait_list)?,
+            )
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -907,7 +1027,16 @@ pub unsafe extern "C" fn clEnqueueUnmapMemObject(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueUnmapMemObject is not implemented");
+    unsafe {
+        ffi::enqueue(consts::CL_FALSE, event, || {
+            platform::CommandQueue::unmap(
+                ffi::queue_id(command_queue),
+                ffi::buffer_id(memobj),
+                ffi::host_pointer(mapped_ptr),
+                ffi::event_wait_list(num_events_in_wait_list, event_wait_list)?,
+            )
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -920,7 +1049,16 @@ pub unsafe extern "C" fn clEnqueueMigrateMemObjects(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueMigrateMemObjects is not implemented");
+    unsafe {
+        ffi::enqueue(consts::CL_FALSE, event, || {
+            platform::CommandQueue::migrate(
+                ffi::queue_id(command_queue),
+                &ffi::buffers(num_mem_objects, mem_objects)?,
+                ffi::migrate_flags(flags)?,
+                ffi::event_wait_list(num_events_in_wait_list, event_wait_list)?,
+            )
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -961,7 +1099,14 @@ pub unsafe extern "C" fn clEnqueueMarkerWithWaitList(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueMarkerWithWaitList is not implemented");
+    unsafe {
+        ffi::enqueue(consts::CL_FALSE, event, || {
+            platform::CommandQueue::marker(
+                ffi::queue_id(command_queue),
+                ffi::event_wait_list(num_events_in_wait_list, event_wait_list)?,
+            )
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -971,7 +1116,14 @@ pub unsafe extern "C" fn clEnqueueBarrierWithWaitList(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueBarrierWithWaitList is not implemented");
+    unsafe {
+        ffi::enqueue(consts::CL_FALSE, event, || {
+            platform::CommandQueue::barrier(
+                ffi::queue_id(command_queue),
+                ffi::event_wait_list(num_events_in_wait_list, event_wait_list)?,
+            )
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -1043,9 +1195,7 @@ pub unsafe extern "C" fn clUnloadCompiler() -> sys::cl_int {
 pub unsafe extern "C" fn clGetExtensionFunctionAddress(
     func_name: *const core::ffi::c_char,
 ) -> *mut core::ffi::c_void {
-    unsafe {
-        clGetExtensionFunctionAddressForPlatform(platform::VoddPlatform::platform_id(), func_name)
-    }
+    unsafe { clGetExtensionFunctionAddressForPlatform(ffi::platform_handle(), func_name) }
 }
 
 #[unsafe(no_mangle)]
@@ -1055,26 +1205,19 @@ pub unsafe extern "C" fn clCreateCommandQueue(
     properties: sys::cl_command_queue_properties,
     errcode_ret: *mut sys::cl_int,
 ) -> sys::cl_command_queue {
-    let Some(associated) =
-        platform::VoddContext::with(ffi::object_id(context), |owner| owner.has_device(device))
-    else {
-        return unsafe { ffi::queue_error(consts::CL_INVALID_CONTEXT, errcode_ret) };
-    };
-
-    if !associated {
-        return unsafe { ffi::queue_error(consts::CL_INVALID_DEVICE, errcode_ret) };
+    unsafe {
+        ffi::object(
+            (|| {
+                platform::CommandQueue::create(
+                    ffi::context_id(context),
+                    ffi::device(device)?,
+                    ffi::queue_properties(properties)?,
+                )
+                .map(platform::QueueId::into_raw)
+            })(),
+            errcode_ret,
+        )
     }
-
-    if let Err(error) = platform::VoddCommandQueue::validate_properties(properties) {
-        return unsafe { ffi::queue_error(error, errcode_ret) };
-    }
-
-    platform::VoddContext::retain(ffi::object_id(context));
-
-    let id = platform::VoddCommandQueue::create(context, device, properties);
-
-    unsafe { ffi::info_write(errcode_ret, consts::CL_SUCCESS) };
-    ffi::object_handle(id)
 }
 
 #[unsafe(no_mangle)]

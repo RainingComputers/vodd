@@ -2,6 +2,11 @@ use crate::sys;
 
 pub const CL_SUCCESS: sys::cl_int = 0;
 pub const CL_DEVICE_NOT_FOUND: sys::cl_int = -1;
+pub const CL_MEM_OBJECT_ALLOCATION_FAILURE: sys::cl_int = -4;
+pub const CL_OUT_OF_HOST_MEMORY: sys::cl_int = -6;
+pub const CL_MEM_COPY_OVERLAP: sys::cl_int = -8;
+pub const CL_MISALIGNED_SUB_BUFFER_OFFSET: sys::cl_int = -13;
+pub const CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST: sys::cl_int = -14;
 pub const CL_INVALID_VALUE: sys::cl_int = -30;
 pub const CL_INVALID_DEVICE_TYPE: sys::cl_int = -31;
 pub const CL_INVALID_PLATFORM: sys::cl_int = -32;
@@ -9,15 +14,22 @@ pub const CL_INVALID_DEVICE: sys::cl_int = -33;
 pub const CL_INVALID_CONTEXT: sys::cl_int = -34;
 pub const CL_INVALID_QUEUE_PROPERTIES: sys::cl_int = -35;
 pub const CL_INVALID_COMMAND_QUEUE: sys::cl_int = -36;
+pub const CL_INVALID_HOST_PTR: sys::cl_int = -37;
+pub const CL_INVALID_MEM_OBJECT: sys::cl_int = -38;
+pub const CL_INVALID_EVENT_WAIT_LIST: sys::cl_int = -57;
+pub const CL_INVALID_EVENT: sys::cl_int = -58;
+pub const CL_INVALID_OPERATION: sys::cl_int = -59;
+pub const CL_INVALID_BUFFER_SIZE: sys::cl_int = -61;
 pub const CL_INVALID_PROPERTY: sys::cl_int = -64;
-pub const CL_OUT_OF_HOST_MEMORY: sys::cl_int = -6;
 
 pub const CL_FALSE: sys::cl_bool = 0;
 pub const CL_TRUE: sys::cl_bool = 1;
 
 pub const CL_NONE: sys::cl_uint = 0x0;
+pub const CL_READ_ONLY_CACHE: sys::cl_device_mem_cache_type = 0x1;
 pub const CL_READ_WRITE_CACHE: sys::cl_device_mem_cache_type = 0x2;
-pub const CL_LOCAL: sys::cl_device_local_mem_type = 0x2;
+pub const CL_LOCAL: sys::cl_device_local_mem_type = 0x1;
+pub const CL_GLOBAL: sys::cl_device_local_mem_type = 0x2;
 
 pub const CL_DEVICE_TYPE_DEFAULT: sys::cl_device_type = 1 << 0;
 pub const CL_DEVICE_TYPE_CPU: sys::cl_device_type = 1 << 1;
@@ -119,9 +131,71 @@ pub const CL_DEVICE_REFERENCE_COUNT: sys::cl_device_info = 0x1047;
 pub const CL_DEVICE_PREFERRED_INTEROP_USER_SYNC: sys::cl_device_info = 0x1048;
 pub const CL_DEVICE_PRINTF_BUFFER_SIZE: sys::cl_device_info = 0x1049;
 
+pub const CL_FP_DENORM: sys::cl_device_fp_config = 1 << 0;
 pub const CL_FP_INF_NAN: sys::cl_device_fp_config = 1 << 1;
 pub const CL_FP_ROUND_TO_NEAREST: sys::cl_device_fp_config = 1 << 2;
+pub const CL_FP_ROUND_TO_ZERO: sys::cl_device_fp_config = 1 << 3;
+pub const CL_FP_ROUND_TO_INF: sys::cl_device_fp_config = 1 << 4;
+pub const CL_FP_FMA: sys::cl_device_fp_config = 1 << 5;
+pub const CL_FP_SOFT_FLOAT: sys::cl_device_fp_config = 1 << 6;
 
 pub const CL_EXEC_KERNEL: sys::cl_device_exec_capabilities = 1 << 0;
+pub const CL_EXEC_NATIVE_KERNEL: sys::cl_device_exec_capabilities = 1 << 1;
 pub const CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE: sys::cl_command_queue_properties = 1 << 0;
 pub const CL_QUEUE_PROFILING_ENABLE: sys::cl_command_queue_properties = 1 << 1;
+
+pub const CL_MEM_READ_WRITE: sys::cl_mem_flags = 1 << 0;
+pub const CL_MEM_WRITE_ONLY: sys::cl_mem_flags = 1 << 1;
+pub const CL_MEM_READ_ONLY: sys::cl_mem_flags = 1 << 2;
+pub const CL_MEM_USE_HOST_PTR: sys::cl_mem_flags = 1 << 3;
+pub const CL_MEM_ALLOC_HOST_PTR: sys::cl_mem_flags = 1 << 4;
+pub const CL_MEM_COPY_HOST_PTR: sys::cl_mem_flags = 1 << 5;
+pub const CL_MEM_HOST_WRITE_ONLY: sys::cl_mem_flags = 1 << 7;
+pub const CL_MEM_HOST_READ_ONLY: sys::cl_mem_flags = 1 << 8;
+pub const CL_MEM_HOST_NO_ACCESS: sys::cl_mem_flags = 1 << 9;
+
+pub const CL_MIGRATE_MEM_OBJECT_HOST: sys::cl_mem_migration_flags = 1 << 0;
+pub const CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED: sys::cl_mem_migration_flags = 1 << 1;
+
+pub const CL_MEM_OBJECT_BUFFER: sys::cl_mem_object_type = 0x10F0;
+
+pub const CL_MEM_TYPE: sys::cl_mem_info = 0x1100;
+pub const CL_MEM_FLAGS: sys::cl_mem_info = 0x1101;
+pub const CL_MEM_SIZE: sys::cl_mem_info = 0x1102;
+pub const CL_MEM_HOST_PTR: sys::cl_mem_info = 0x1103;
+pub const CL_MEM_MAP_COUNT: sys::cl_mem_info = 0x1104;
+pub const CL_MEM_REFERENCE_COUNT: sys::cl_mem_info = 0x1105;
+pub const CL_MEM_CONTEXT: sys::cl_mem_info = 0x1106;
+pub const CL_MEM_ASSOCIATED_MEMOBJECT: sys::cl_mem_info = 0x1107;
+pub const CL_MEM_OFFSET: sys::cl_mem_info = 0x1108;
+
+pub const CL_MAP_READ: sys::cl_map_flags = 1 << 0;
+pub const CL_MAP_WRITE: sys::cl_map_flags = 1 << 1;
+pub const CL_MAP_WRITE_INVALIDATE_REGION: sys::cl_map_flags = 1 << 2;
+
+pub const CL_EVENT_COMMAND_QUEUE: sys::cl_event_info = 0x11D0;
+pub const CL_EVENT_COMMAND_TYPE: sys::cl_event_info = 0x11D1;
+pub const CL_EVENT_REFERENCE_COUNT: sys::cl_event_info = 0x11D2;
+pub const CL_EVENT_COMMAND_EXECUTION_STATUS: sys::cl_event_info = 0x11D3;
+pub const CL_EVENT_CONTEXT: sys::cl_event_info = 0x11D4;
+
+pub const CL_COMMAND_READ_BUFFER: sys::cl_command_type = 0x11F3;
+pub const CL_COMMAND_WRITE_BUFFER: sys::cl_command_type = 0x11F4;
+pub const CL_COMMAND_COPY_BUFFER: sys::cl_command_type = 0x11F5;
+pub const CL_COMMAND_MAP_BUFFER: sys::cl_command_type = 0x11FB;
+pub const CL_COMMAND_UNMAP_MEM_OBJECT: sys::cl_command_type = 0x11FD;
+pub const CL_COMMAND_MARKER: sys::cl_command_type = 0x11FE;
+pub const CL_COMMAND_READ_BUFFER_RECT: sys::cl_command_type = 0x1201;
+pub const CL_COMMAND_WRITE_BUFFER_RECT: sys::cl_command_type = 0x1202;
+pub const CL_COMMAND_COPY_BUFFER_RECT: sys::cl_command_type = 0x1203;
+pub const CL_COMMAND_USER: sys::cl_command_type = 0x1204;
+pub const CL_COMMAND_BARRIER: sys::cl_command_type = 0x1205;
+pub const CL_COMMAND_MIGRATE_MEM_OBJECTS: sys::cl_command_type = 0x1206;
+pub const CL_COMMAND_FILL_BUFFER: sys::cl_command_type = 0x1207;
+
+pub const CL_COMPLETE: sys::cl_int = 0x0;
+pub const CL_RUNNING: sys::cl_int = 0x1;
+pub const CL_SUBMITTED: sys::cl_int = 0x2;
+pub const CL_QUEUED: sys::cl_int = 0x3;
+
+pub const CL_BUFFER_CREATE_TYPE_REGION: sys::cl_buffer_create_type = 0x1220;

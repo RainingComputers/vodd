@@ -30,6 +30,11 @@ pub type cl_context_callback = unsafe extern "C" fn(
 pub type cl_device_info = cl_uint;
 pub type cl_device_local_mem_type = cl_uint;
 pub type cl_device_mem_cache_type = cl_uint;
+pub type cl_event_callback = unsafe extern "C" fn(
+    event: cl_event,
+    event_command_status: cl_int,
+    user_data: *mut core::ffi::c_void,
+);
 pub type cl_event_info = cl_uint;
 pub type cl_filter_mode = cl_uint;
 pub type cl_image_info = cl_uint;
@@ -38,6 +43,8 @@ pub type cl_kernel_arg_address_qualifier = cl_uint;
 pub type cl_kernel_arg_info = cl_uint;
 pub type cl_kernel_info = cl_uint;
 pub type cl_kernel_work_group_info = cl_uint;
+pub type cl_mem_destructor_callback =
+    unsafe extern "C" fn(memobj: cl_mem, user_data: *mut core::ffi::c_void);
 pub type cl_mem_info = cl_uint;
 pub type cl_mem_object_type = cl_uint;
 pub type cl_platform_info = cl_uint;
@@ -53,10 +60,10 @@ pub type cl_device_affinity_domain = cl_bitfield;
 pub type cl_device_exec_capabilities = cl_bitfield;
 pub type cl_device_fp_config = cl_bitfield;
 pub type cl_device_type = cl_bitfield;
+pub type cl_kernel_arg_type_qualifier = cl_bitfield;
 pub type cl_map_flags = cl_bitfield;
 pub type cl_mem_flags = cl_bitfield;
 pub type cl_mem_migration_flags = cl_bitfield;
-pub type cl_kernel_arg_type_qualifier = cl_bitfield;
 
 pub type cl_context_properties = isize;
 pub type cl_device_partition_property = isize;
