@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 
 const MAX_WORK_GROUP_SIZE: usize = 256;
 const MAX_MEM_ALLOC_SIZE: u64 = 1024 * 1024 * 1024;
-const MEM_BASE_ADDR_ALIGN_BITS: u32 = 1024;
+const MEM_BASE_ADDR_ALIGN_BITS: u32 = 1024; // TODO: what does this mean?
 
 static NEXT_OBJECT_ID: AtomicU32 = AtomicU32::new(1);
 static CONTEXTS: Mutex<BTreeMap<ContextId, Context>> = Mutex::new(BTreeMap::new());
@@ -37,12 +37,14 @@ fn signal_progress() {
 }
 
 fn await_progress(generation: u64) {
+    // TODO: how does this work
     let progress = PROGRESS.lock().expect("progress");
     let _settled = PROGRESSED
         .wait_while(progress, |current| *current == generation)
         .expect("progress");
 }
 
+// TODO: ensure all of these errors are used
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Error {
     DeviceNotFound,
@@ -226,10 +228,12 @@ impl QueueProperties {
     pub const SUPPORTED: Self = Self { out_of_order: false, profiling: true };
 
     fn within(self, supported: Self) -> bool {
+        // TODO: should supported be renamed to other? should it be the other way round so within reads nicely?
         (supported.out_of_order || !self.out_of_order) && (supported.profiling || !self.profiling)
     }
 }
 
+// TODO: what are these different types of properties below, deal  with better validation of this
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ContextProperty {
     Platform,
@@ -290,6 +294,7 @@ impl MemFlags {
             _ => true,
         };
 
+        // TODO: does'nt read only or  write only matter here?
         let host = match (parent.host_access, self.host_access) {
             (_, HostAccess::Unspecified) => true,
             (HostAccess::NoAccess, _) => false,
@@ -339,6 +344,7 @@ pub enum MemObjectType {
     Buffer,
 }
 
+// TODO: are all of these used?
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CommandType {
     ReadBuffer,
@@ -384,6 +390,8 @@ impl Status {
         matches!(self, Status::Terminated(_))
     }
 }
+
+// TODO: for below *Info or *Param?
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PlatformInfo {
@@ -509,6 +517,7 @@ pub enum EventInfo {
     ReferenceCount,
 }
 
+// TODO: ParamValue?
 pub enum InfoValue {
     Bool(bool),
     Uint(u32),
@@ -570,6 +579,7 @@ impl Device {
     pub const MEM_BASE_ADDR_ALIGN: usize = MEM_BASE_ADDR_ALIGN_BITS as usize / 8;
 
     pub fn info(self, param: DeviceInfo) -> InfoValue {
+        // TODO: validate below
         match param {
             DeviceInfo::Type => InfoValue::DeviceType(Self::TYPE),
             DeviceInfo::VendorId => InfoValue::Uint(0),
@@ -667,6 +677,8 @@ impl Context {
         devices: Vec<Device>,
         notify: Option<Notify>,
     ) -> Result<ContextId> {
+        // TODO: validate properties passed to create?
+
         if devices.is_empty() {
             return Err(Error::InvalidValue);
         }
@@ -726,6 +738,7 @@ impl Context {
     }
 
     fn report(id: ContextId, message: &str) {
+        // TODO: why is this called report instead of notify?
         let notify = CONTEXTS
             .lock()
             .expect("contexts")
@@ -744,6 +757,8 @@ pub enum Target {
     Host(HostPointer),
 }
 
+// TODO: maybe a nicer name then 'Slab' unless its an actual opencl terminology
+// TODO: what does 'Slab' mean?
 #[derive(Clone, Copy)]
 pub struct Slab {
     pub target: Target,
@@ -795,6 +810,7 @@ impl Slab {
         } else {
             self.row_pitch
         };
+
         let slice = if self.slice_pitch == 0 {
             region[1] * row
         } else {
@@ -831,6 +847,7 @@ impl Slab {
     }
 }
 
+// TODO: what does region mean?
 pub enum Command {
     Copy {
         source: Slab,
@@ -893,6 +910,7 @@ impl Command {
     }
 }
 
+// TODO: explain this function
 fn copy_slabs(
     from: HostPointer,
     source: &Slab,
@@ -922,6 +940,7 @@ fn copy_slabs(
     }
 }
 
+// TODO: explain this function
 fn fill_slab(into: HostPointer, destination: &Slab, region: &[usize; 3], pattern: &[u8]) {
     let start = destination.start(region);
 
@@ -1043,6 +1062,9 @@ impl CommandQueue {
     }
 
     pub fn flush(id: QueueId) -> Result<()> {
+        // TODO: don't we have to implement this? why are we not implementing this?
+        // TODO: should this call finish?
+
         QUEUES
             .lock()
             .expect("queues")
@@ -1070,6 +1092,7 @@ impl CommandQueue {
         }
     }
 
+    // TODO: should this be prefixed with enqueue_?
     pub fn read_buffer(
         id: QueueId,
         buffer: BufferId,
@@ -1090,6 +1113,7 @@ impl CommandQueue {
         )
     }
 
+    // TODO: should this be prefixed with enqueue_?
     pub fn write_buffer(
         id: QueueId,
         buffer: BufferId,
@@ -1110,6 +1134,7 @@ impl CommandQueue {
         )
     }
 
+    // TODO: should this be prefixed with enqueue_?
     pub fn copy_buffer(
         id: QueueId,
         source: BufferId,
@@ -1136,6 +1161,7 @@ impl CommandQueue {
         )
     }
 
+    // TODO: should this be called enqueue_transfer
     pub fn transfer(
         id: QueueId,
         source: Slab,
@@ -1167,6 +1193,7 @@ impl CommandQueue {
         )
     }
 
+    // TODO: should this be prefixed with enqueue_?
     pub fn fill_buffer(
         id: QueueId,
         buffer: BufferId,
@@ -1193,6 +1220,7 @@ impl CommandQueue {
         )
     }
 
+    // TODO: should this be prefixed with enqueue_?
     pub fn map_buffer(
         id: QueueId,
         buffer: BufferId,
@@ -1213,6 +1241,7 @@ impl CommandQueue {
         }
     }
 
+    // TODO: should this be prefixed with enqueue_?
     pub fn unmap(
         id: QueueId,
         buffer: BufferId,
@@ -1233,6 +1262,7 @@ impl CommandQueue {
         )
     }
 
+    // TODO: should this be prefixed with enqueue_?
     pub fn migrate(
         id: QueueId,
         buffers: &[BufferId],
@@ -1250,10 +1280,12 @@ impl CommandQueue {
         Self::enqueue(id, Command::Nothing, CommandType::MigrateMemObjects, wait)
     }
 
+    // TODO: should this be prefixed with enqueue_?
     pub fn marker(id: QueueId, wait: Vec<EventId>) -> Result<EventId> {
         Self::enqueue(id, Command::Nothing, CommandType::Marker, wait)
     }
 
+    // TODO: should this be prefixed with enqueue_?
     pub fn barrier(id: QueueId, wait: Vec<EventId>) -> Result<EventId> {
         Self::enqueue(id, Command::Nothing, CommandType::Barrier, wait)
     }
@@ -1304,7 +1336,7 @@ pub struct Buffer {
     parent: Option<BufferId>,
     origin: usize,
     map_count: u32,
-    maps: Vec<(usize, usize, MapFlags)>,
+    maps: Vec<(usize, usize, MapFlags)>, 
     destructors: Vec<DestructorNotify>,
 }
 
@@ -1773,6 +1805,7 @@ impl Event {
     }
 }
 
+// TODO: should this be called upsert_worker?
 fn update_worker() {
     let mut worker = WORKER.lock().expect("worker");
     let idle = QUEUES.lock().expect("queues").is_empty();
@@ -1787,6 +1820,7 @@ fn update_worker() {
             signal_progress();
             running.join().expect("worker");
         }
+        // TODO: is this branch even necessary? or can this branch just be ()?
         (_, existing) => *worker = existing,
     }
 }
@@ -1837,6 +1871,7 @@ fn step() -> bool {
         );
     }
 
+    // TODO: so a non user event never fails at all? because this is always Status::Complete?
     Event::set_status(enqueued.event, status);
     let _released = Event::release(enqueued.event);
 
