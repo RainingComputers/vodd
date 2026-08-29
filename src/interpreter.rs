@@ -1,6 +1,8 @@
 use crate::bitcode;
 use crate::value;
 
+pub use crate::bitcode::AtomicOp as Atomic;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Bitcode(bitcode::Error),
@@ -28,12 +30,6 @@ impl From<bitcode::Error> for Error {
     fn from(error: bitcode::Error) -> Error {
         Error::Bitcode(error)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Atomic {
-    Increment,
-    Decrement,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +60,9 @@ pub enum YieldReason {
         operation: Atomic,
         address: u64,
         width: u32,
+        local: bool,
+        value: u64,
+        comparator: u64,
     },
     Builtin(bitcode::Builtin),
     MemoryBarrier {
@@ -136,18 +135,73 @@ impl Frame {
 
 #[derive(Debug, Clone)]
 pub struct Interpreter {
-    module: bitcode::Module,
+    module: std::sync::Arc<bitcode::Module>,
     module_storage: Vec<u8>,
     module_offsets: Vec<Option<usize>>,
+    local_offsets: Vec<Option<usize>>,
     frames: Vec<Frame>,
     storage: Vec<u8>,
     fuel: usize,
     pending: Option<YieldReason>,
 }
 
+pub fn local_memory_size(module: &bitcode::Module) -> Result<usize, Error> {
+    Ok(local_layout(module)?.1)
+}
+
+fn local_layout(module: &bitcode::Module) -> Result<(Vec<Option<usize>>, usize), Error> {
+    let mut offsets = vec![None; module.bound()];
+    let mut size = 0;
+
+    let stored = module
+        .variables()
+        .iter()
+        .filter(|variable| variable.storage == bitcode::StorageClass::Workgroup);
+
+    for variable in stored {
+        let pointee_type = module.pointee_type(variable.result_type)?;
+        let layout = module.layout(pointee_type)?;
+        let offset = bitcode::align_up(size, layout.alignment);
+
+        offsets[variable.result as usize] = Some(offset);
+        size = offset + layout.size;
+    }
+
+    Ok((offsets, size))
+}
+
+fn offset_of(offsets: &[Option<usize>], id: bitcode::Id) -> Result<u64, Error> {
+    offsets
+        .get(id as usize)
+        .copied()
+        .flatten()
+        .map(|offset| offset as u64)
+        .ok_or(Error::UnboundValue(id))
+}
+
+fn insert(
+    composite: value::Value,
+    indices: &[u32],
+    object: value::Value,
+) -> Result<value::Value, Error> {
+    let Some((index, rest)) = indices.split_first() else {
+        return Ok(object);
+    };
+
+    match composite {
+        value::Value::Composite(mut members) => {
+            let slot = members.get_mut(*index as usize).ok_or(Error::OutOfBounds)?;
+            *slot = insert(slot.clone(), rest, object)?;
+
+            Ok(value::Value::Composite(members))
+        }
+        _ => Err(value::Error::NotAComposite.into()),
+    }
+}
+
 impl Interpreter {
     pub fn new(
-        module: bitcode::Module,
+        module: std::sync::Arc<bitcode::Module>,
         function: bitcode::Id,
         arguments: &[Argument],
         fuel: usize,
@@ -186,10 +240,13 @@ impl Interpreter {
         for (parameter, argument) in entry.parameters.iter().zip(arguments) {
             values[parameter.result as usize] = Some(match argument {
                 Argument::Buffer(address) => {
-                    let storage = module.storage_class(parameter.result_type)?;
+                    let region = match module.storage_class(parameter.result_type)? {
+                        bitcode::StorageClass::UniformConstant => value::Region::Global,
+                        storage => value::Region::from_storage_class(storage)?,
+                    };
 
                     value::Value::Pointer(value::Pointer {
-                        region: value::Region::from_storage_class(storage)?,
+                        region,
                         address: *address,
                         pointee_type: module.pointee_type(parameter.result_type)?,
                     })
@@ -199,11 +256,13 @@ impl Interpreter {
         }
 
         let frame = Frame::new(function, entry.entry_label()?, values, None, 0);
+        let (local_offsets, _) = local_layout(&module)?;
 
         Ok(Interpreter {
             module,
             module_storage,
             module_offsets,
+            local_offsets,
             frames: vec![frame],
             storage: Vec::new(),
             fuel,
@@ -458,6 +517,75 @@ impl Interpreter {
                 self.advance()?;
             }
 
+            bitcode::Instruction::CompositeInsert {
+                result, object, composite, indices, ..
+            } => {
+                let object = self.value(*object)?;
+                let composite = self.value(*composite)?;
+                let updated = insert(composite, indices, object)?;
+
+                self.bind(*result, updated)?;
+                self.advance()?;
+            }
+
+            bitcode::Instruction::VectorShuffle {
+                result,
+                result_type,
+                first,
+                second,
+                components,
+            } => {
+                let component_type = self.module.component_type(*result_type)?;
+                let mut lanes = match self.value(*first)? {
+                    value::Value::Composite(members) => members,
+                    scalar => vec![scalar],
+                };
+
+                match self.value(*second)? {
+                    value::Value::Composite(members) => lanes.extend(members),
+                    scalar => lanes.push(scalar),
+                }
+
+                let selected = components
+                    .iter()
+                    .map(|component| match lanes.get(*component as usize) {
+                        Some(lane) => Ok(lane.clone()),
+                        None if *component == u32::MAX => {
+                            Ok(value::zeroed(&self.module, component_type)?)
+                        }
+                        None => Err(Error::OutOfBounds),
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+
+                self.bind(*result, value::Value::Composite(selected))?;
+                self.advance()?;
+            }
+
+            bitcode::Instruction::Dot { result, result_type, lhs, rhs } => {
+                let left = self.value(*lhs)?;
+                let right = self.value(*rhs)?;
+                let product = value::dot(&self.module, *result_type, &left, &right)?;
+
+                self.bind(*result, product)?;
+                self.advance()?;
+            }
+
+            bitcode::Instruction::ExtInst { result, result_type, set, instruction, operands } => {
+                if Some(*set) != self.module.opencl_std() {
+                    return Err(bitcode::Error::UnsupportedExtInstSet(*set).into());
+                }
+
+                let operands = operands
+                    .iter()
+                    .map(|operand| self.value(*operand))
+                    .collect::<Result<Vec<_>, Error>>()?;
+                let computed =
+                    value::ext_inst(&self.module, *result_type, *instruction, &operands)?;
+
+                self.bind(*result, computed)?;
+                self.advance()?;
+            }
+
             bitcode::Instruction::VectorExtractDynamic { result, vector, index, .. } => {
                 let source = self.value(*vector)?;
                 let position = self.value(*index)?.as_bits()? as usize;
@@ -518,27 +646,36 @@ impl Interpreter {
                 self.advance()?;
             }
 
-            bitcode::Instruction::AtomicCounter { result, result_type, pointer, increment } => {
-                let width = self.module.scalar_width(*result_type)?;
+            bitcode::Instruction::Atomic {
+                result,
+                operation,
+                pointer,
+                value: operand,
+                comparator,
+            } => {
+                let target = self.value(*pointer)?.as_pointer()?;
+                let width = self.module.scalar_width(target.pointee_type)?;
 
                 match resume.take() {
                     Some(Resume::Scalar(previous)) => {
-                        self.bind(*result, value::Value::from_bits(previous, width))?;
+                        if let Some(result) = result {
+                            self.bind(*result, value::Value::from_bits(previous, width))?;
+                        }
+
                         self.advance()?;
                     }
                     Some(_) => return Err(Error::UnexpectedResume),
                     None => {
-                        let target = self.value(*pointer)?.as_pointer()?;
-                        let operation = if *increment {
-                            Atomic::Increment
-                        } else {
-                            Atomic::Decrement
-                        };
+                        let operand = self.optional_bits(*operand)?;
+                        let comparator = self.optional_bits(*comparator)?;
 
                         return self.yield_(YieldReason::Atomic {
-                            operation,
+                            operation: *operation,
                             address: target.address,
                             width,
+                            local: target.region == value::Region::Local,
+                            value: operand,
+                            comparator,
                         });
                     }
                 }
@@ -711,13 +848,8 @@ impl Interpreter {
 
             let region = value::Region::from_storage_class(variable.storage)?;
             let address = match region {
-                value::Region::Module => {
-                    self.module_offsets
-                        .get(id as usize)
-                        .copied()
-                        .flatten()
-                        .ok_or(Error::UnboundValue(id))? as u64
-                }
+                value::Region::Module => offset_of(&self.module_offsets, id)?,
+                value::Region::Local => offset_of(&self.local_offsets, id)?,
                 _ => 0,
             };
 
@@ -729,6 +861,13 @@ impl Interpreter {
         }
 
         Err(Error::UnboundValue(id))
+    }
+
+    fn optional_bits(&self, id: Option<bitcode::Id>) -> Result<u64, Error> {
+        match id {
+            Some(id) => Ok(self.value(id)?.as_bits()?),
+            None => Ok(0),
+        }
     }
 
     fn bind(&mut self, id: bitcode::Id, value: value::Value) -> Result<(), Error> {

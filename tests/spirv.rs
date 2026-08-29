@@ -108,7 +108,8 @@ fn spirv_cases() {
 
 fn run_spirv_case(spirv_case: &SpirvCase, drive: Driver<'_>) -> Result<Vec<u8>, String> {
     let binary = assemble(&spirv_case.assembly)?;
-    let module = parser::parse(&binary).map_err(|error| format!("parse: {error:?}"))?;
+    let module =
+        std::sync::Arc::new(parser::parse(&binary).map_err(|error| format!("parse: {error:?}"))?);
     let function = module
         .entry(&spirv_case.entry)
         .map_err(|error| format!("entry: {error:?}"))?
@@ -117,9 +118,13 @@ fn run_spirv_case(spirv_case: &SpirvCase, drive: Driver<'_>) -> Result<Vec<u8>, 
     let (mut buffers, arguments) = create_buffer(&spirv_case.arguments);
 
     for id in 0..spirv_case.global_work_size {
-        let mut interpreter =
-            interpreter::Interpreter::new(module.clone(), function, &arguments, FUEL)
-                .map_err(|error| format!("invocation: {error:?}"))?;
+        let mut interpreter = interpreter::Interpreter::new(
+            std::sync::Arc::clone(&module),
+            function,
+            &arguments,
+            FUEL,
+        )
+        .map_err(|error| format!("invocation: {error:?}"))?;
 
         drive(&mut interpreter, &mut buffers, [id as u64, 0, 0])
             .map_err(|error| format!("work item {id}: {error}"))?;
@@ -198,17 +203,16 @@ fn driver_inner(
             write(buffers, address, &bytes)?;
             interpreter::Resume::Ack
         }
-        interpreter::YieldReason::Atomic { operation, address, width } => {
+        interpreter::YieldReason::Atomic {
+            operation, address, width, value, comparator, ..
+        } => {
             let size = (width as usize).div_ceil(8);
             let mut buffer = [0u8; 8];
 
             buffer[..size].copy_from_slice(&read(buffers, address, size)?);
 
             let previous = u64::from_le_bytes(buffer);
-            let updated = match operation {
-                interpreter::Atomic::Increment => previous.wrapping_add(1),
-                interpreter::Atomic::Decrement => previous.wrapping_sub(1),
-            };
+            let updated = atomic(operation, previous, value, comparator, width);
 
             write(buffers, address, &updated.to_le_bytes()[..size])?;
 
@@ -223,6 +227,39 @@ fn driver_inner(
         interpreter::YieldReason::MemoryBarrier { .. }
         | interpreter::YieldReason::ControlBarrier { .. } => interpreter::Resume::Ack,
     })
+}
+
+fn atomic(
+    operation: interpreter::Atomic,
+    previous: u64,
+    value: u64,
+    comparator: u64,
+    width: u32,
+) -> u64 {
+    let signed = |bits: u64| ((bits << (64 - width)) as i64) >> (64 - width);
+
+    match operation {
+        interpreter::Atomic::Load => previous,
+        interpreter::Atomic::Store | interpreter::Atomic::Exchange => value,
+        interpreter::Atomic::CompareExchange => {
+            if previous == comparator {
+                value
+            } else {
+                previous
+            }
+        }
+        interpreter::Atomic::Increment => previous.wrapping_add(1),
+        interpreter::Atomic::Decrement => previous.wrapping_sub(1),
+        interpreter::Atomic::Add => previous.wrapping_add(value),
+        interpreter::Atomic::Sub => previous.wrapping_sub(value),
+        interpreter::Atomic::SignedMin => signed(previous).min(signed(value)) as u64,
+        interpreter::Atomic::UnsignedMin => previous.min(value),
+        interpreter::Atomic::SignedMax => signed(previous).max(signed(value)) as u64,
+        interpreter::Atomic::UnsignedMax => previous.max(value),
+        interpreter::Atomic::And => previous & value,
+        interpreter::Atomic::Or => previous | value,
+        interpreter::Atomic::Xor => previous ^ value,
+    }
 }
 
 fn create_buffer(case_arguments: &[SpirvCaseArgument]) -> (Buffers, Vec<interpreter::Argument>) {

@@ -24,6 +24,7 @@ pub enum Region {
     Local,
     Module,
     Invocation,
+    Generic,
     Builtin(bitcode::Builtin),
 }
 
@@ -36,7 +37,8 @@ impl Region {
                 Region::Module
             }
             bitcode::StorageClass::Function => Region::Invocation,
-            bitcode::StorageClass::Input | bitcode::StorageClass::Generic => {
+            bitcode::StorageClass::Generic => Region::Generic,
+            bitcode::StorageClass::Input => {
                 return Err(Error::UnsupportedStorageClass(storage));
             }
         })
@@ -270,6 +272,10 @@ fn unary_op_scalar(
     operation: bitcode::UnaryOp,
     value: &Value,
 ) -> Result<Value, Error> {
+    if operation == bitcode::UnaryOp::LogicalNot {
+        return Ok(Value::Bool(!value.as_bool()?));
+    }
+
     let width = module.scalar_width(component_type)?;
     let bits = value.as_bits()?;
 
@@ -283,6 +289,7 @@ fn unary_op_scalar(
                 (-f32::from_bits(bits as u32)).to_bits() as u64
             }
         }
+        bitcode::UnaryOp::LogicalNot => return Err(Error::UnsupportedOperation),
     };
 
     Ok(Value::from_bits(result, width))
@@ -322,27 +329,13 @@ pub(crate) fn binary_op_scalar(
     left: &Value,
     right: &Value,
 ) -> Result<Value, Error> {
-    let comparison = matches!(
-        operation,
-        bitcode::BinaryOp::ULessThan | bitcode::BinaryOp::SLessThan | bitcode::BinaryOp::INotEqual
-    );
-    let width = if comparison {
-        operand_width(left)
-    } else {
-        module.scalar_width(component_type)?
-    };
-    let left = left.as_bits()?;
-    let right = right.as_bits()?;
-
-    if comparison {
-        let result = match operation {
-            bitcode::BinaryOp::ULessThan => mask(left, width) < mask(right, width),
-            bitcode::BinaryOp::SLessThan => sign_extend(left, width) < sign_extend(right, width),
-            _ => mask(left, width) != mask(right, width),
-        };
-
+    if let Some(result) = predicate_op(operation, left, right)? {
         return Ok(Value::Bool(result));
     }
+
+    let width = module.scalar_width(component_type)?;
+    let left = left.as_bits()?;
+    let right = right.as_bits()?;
 
     let float = matches!(
         operation,
@@ -385,46 +378,137 @@ pub(crate) fn binary_op_scalar(
             result.to_bits() as u64
         }
     } else {
-        match operation {
-            bitcode::BinaryOp::IAdd => mask(left.wrapping_add(right), width),
-            bitcode::BinaryOp::ISub => mask(left.wrapping_sub(right), width),
-            bitcode::BinaryOp::IMul => mask(left.wrapping_mul(right), width),
-            bitcode::BinaryOp::UMod => {
-                let divisor = mask(right, width);
-
-                if divisor == 0 {
-                    0
-                } else {
-                    mask(left, width) % divisor
-                }
-            }
-            bitcode::BinaryOp::ShiftLeftLogical => {
-                let amount = mask(right, width);
-
-                if amount >= u64::from(width) {
-                    0
-                } else {
-                    mask(left << amount, width)
-                }
-            }
-            bitcode::BinaryOp::ShiftRightArithmetic => {
-                let amount = mask(right, width);
-
-                if amount >= u64::from(width) {
-                    if sign_extend(left, width) < 0 {
-                        mask(u64::MAX, width)
-                    } else {
-                        0
-                    }
-                } else {
-                    mask((sign_extend(left, width) >> amount) as u64, width)
-                }
-            }
-            _ => return Err(Error::UnsupportedOperation),
-        }
+        integer_op(operation, width, left, right)?
     };
 
     Ok(Value::from_bits(result, width))
+}
+
+fn predicate_op(
+    operation: bitcode::BinaryOp,
+    left: &Value,
+    right: &Value,
+) -> Result<Option<bool>, Error> {
+    let width = operand_width(left);
+    let unsigned = |value: &Value| -> Result<u64, Error> { Ok(mask(value.as_bits()?, width)) };
+    let signed = |value: &Value| -> Result<i64, Error> { Ok(sign_extend(value.as_bits()?, width)) };
+
+    Ok(Some(match operation {
+        bitcode::BinaryOp::IEqual => unsigned(left)? == unsigned(right)?,
+        bitcode::BinaryOp::INotEqual => unsigned(left)? != unsigned(right)?,
+        bitcode::BinaryOp::ULessThan => unsigned(left)? < unsigned(right)?,
+        bitcode::BinaryOp::ULessThanEqual => unsigned(left)? <= unsigned(right)?,
+        bitcode::BinaryOp::UGreaterThan => unsigned(left)? > unsigned(right)?,
+        bitcode::BinaryOp::UGreaterThanEqual => unsigned(left)? >= unsigned(right)?,
+        bitcode::BinaryOp::SLessThan => signed(left)? < signed(right)?,
+        bitcode::BinaryOp::SLessThanEqual => signed(left)? <= signed(right)?,
+        bitcode::BinaryOp::SGreaterThan => signed(left)? > signed(right)?,
+        bitcode::BinaryOp::SGreaterThanEqual => signed(left)? >= signed(right)?,
+        bitcode::BinaryOp::FOrdEqual => as_float(left)? == as_float(right)?,
+        bitcode::BinaryOp::FOrdLessThan => as_float(left)? < as_float(right)?,
+        bitcode::BinaryOp::FOrdLessThanEqual => as_float(left)? <= as_float(right)?,
+        bitcode::BinaryOp::FOrdGreaterThan => as_float(left)? > as_float(right)?,
+        bitcode::BinaryOp::FOrdGreaterThanEqual => as_float(left)? >= as_float(right)?,
+        bitcode::BinaryOp::FOrdNotEqual => {
+            let (left, right) = (as_float(left)?, as_float(right)?);
+
+            !left.is_nan() && !right.is_nan() && left != right
+        }
+        bitcode::BinaryOp::FUnordEqual
+        | bitcode::BinaryOp::FUnordNotEqual
+        | bitcode::BinaryOp::FUnordLessThan
+        | bitcode::BinaryOp::FUnordGreaterThan
+        | bitcode::BinaryOp::FUnordLessThanEqual
+        | bitcode::BinaryOp::FUnordGreaterThanEqual => {
+            let (left, right) = (as_float(left)?, as_float(right)?);
+
+            left.is_nan()
+                || right.is_nan()
+                || match operation {
+                    bitcode::BinaryOp::FUnordEqual => left == right,
+                    bitcode::BinaryOp::FUnordNotEqual => left != right,
+                    bitcode::BinaryOp::FUnordLessThan => left < right,
+                    bitcode::BinaryOp::FUnordGreaterThan => left > right,
+                    bitcode::BinaryOp::FUnordLessThanEqual => left <= right,
+                    _ => left >= right,
+                }
+        }
+        bitcode::BinaryOp::LogicalEqual => left.as_bool()? == right.as_bool()?,
+        bitcode::BinaryOp::LogicalNotEqual => left.as_bool()? != right.as_bool()?,
+        bitcode::BinaryOp::LogicalOr => left.as_bool()? || right.as_bool()?,
+        bitcode::BinaryOp::LogicalAnd => left.as_bool()? && right.as_bool()?,
+        _ => return Ok(None),
+    }))
+}
+
+fn integer_op(
+    operation: bitcode::BinaryOp,
+    width: u32,
+    left: u64,
+    right: u64,
+) -> Result<u64, Error> {
+    Ok(match operation {
+        bitcode::BinaryOp::IAdd => mask(left.wrapping_add(right), width),
+        bitcode::BinaryOp::ISub => mask(left.wrapping_sub(right), width),
+        bitcode::BinaryOp::IMul => mask(left.wrapping_mul(right), width),
+        bitcode::BinaryOp::BitwiseOr => mask(left | right, width),
+        bitcode::BinaryOp::BitwiseXor => mask(left ^ right, width),
+        bitcode::BinaryOp::BitwiseAnd => mask(left & right, width),
+        bitcode::BinaryOp::UDiv | bitcode::BinaryOp::UMod => {
+            let divisor = mask(right, width);
+
+            match (divisor, operation) {
+                (0, _) => 0,
+                (_, bitcode::BinaryOp::UDiv) => mask(left, width) / divisor,
+                _ => mask(left, width) % divisor,
+            }
+        }
+        bitcode::BinaryOp::SDiv | bitcode::BinaryOp::SRem | bitcode::BinaryOp::SMod => {
+            let dividend = sign_extend(left, width);
+            let divisor = sign_extend(right, width);
+
+            let result = match (divisor, operation) {
+                (0, _) => 0,
+                (_, bitcode::BinaryOp::SDiv) => dividend.wrapping_div(divisor),
+                (_, bitcode::BinaryOp::SRem) => dividend.wrapping_rem(divisor),
+                _ => modulo_with_sign(dividend, divisor),
+            };
+
+            mask(result as u64, width)
+        }
+        bitcode::BinaryOp::ShiftLeftLogical => {
+            let amount = mask(right, width);
+
+            if amount >= u64::from(width) {
+                0
+            } else {
+                mask(mask(left, width) << amount, width)
+            }
+        }
+        bitcode::BinaryOp::ShiftRightLogical => {
+            let amount = mask(right, width);
+
+            if amount >= u64::from(width) {
+                0
+            } else {
+                mask(left, width) >> amount
+            }
+        }
+        bitcode::BinaryOp::ShiftRightArithmetic => {
+            let amount = mask(right, width);
+
+            if amount >= u64::from(width) {
+                if sign_extend(left, width) < 0 {
+                    mask(u64::MAX, width)
+                } else {
+                    0
+                }
+            } else {
+                mask((sign_extend(left, width) >> amount) as u64, width)
+            }
+        }
+        _ => return Err(Error::UnsupportedOperation),
+    })
 }
 
 pub(crate) fn convert_op(
@@ -435,6 +519,12 @@ pub(crate) fn convert_op(
     rounding: Option<bitcode::RoundingMode>,
     saturated: bool,
 ) -> Result<Value, Error> {
+    if operation == bitcode::ConvertOp::Bitcast
+        && let Some(converted) = bitcast_pointer(module, result_type, value)?
+    {
+        return Ok(converted);
+    }
+
     let component_type = module.component_type(result_type)?;
 
     match value {
@@ -479,6 +569,18 @@ fn convert_op_scalar(
     let result = match operation {
         bitcode::ConvertOp::UConvert => mask(source_bits, width),
         bitcode::ConvertOp::SConvert => mask(sign_extend(source_bits, source_width) as u64, width),
+        bitcode::ConvertOp::Bitcast => {
+            if source_width != width {
+                return Err(Error::UnsupportedOperation);
+            }
+
+            source_bits
+        }
+        bitcode::ConvertOp::FConvert => float_bits(as_float(value)?, width),
+        bitcode::ConvertOp::SToF => {
+            float_bits(sign_extend(source_bits, source_width) as f64, width)
+        }
+        bitcode::ConvertOp::UToF => float_bits(mask(source_bits, source_width) as f64, width),
         bitcode::ConvertOp::FToS | bitcode::ConvertOp::FToU => {
             let source = if source_width == 64 {
                 f64::from_bits(source_bits)
@@ -519,6 +621,184 @@ fn convert_op_scalar(
     };
 
     Ok(Value::from_bits(result, width))
+}
+
+fn bitcast_pointer(
+    module: &bitcode::Module,
+    result_type: bitcode::Id,
+    value: &Value,
+) -> Result<Option<Value>, Error> {
+    if let bitcode::Type::Pointer { storage, pointee_type } = module.type_(result_type)? {
+        let (region, address) = match value {
+            Value::Pointer(pointer) => (pointer.region, pointer.address),
+            scalar => (Region::from_storage_class(*storage)?, scalar.as_bits()?),
+        };
+
+        return Ok(Some(Value::Pointer(Pointer {
+            region,
+            address,
+            pointee_type: *pointee_type,
+        })));
+    }
+
+    match value {
+        Value::Pointer(pointer) => {
+            let width = module.scalar_width(module.component_type(result_type)?)?;
+
+            Ok(Some(Value::from_bits(pointer.address, width)))
+        }
+        _ => Ok(None),
+    }
+}
+
+pub(crate) fn dot(
+    module: &bitcode::Module,
+    result_type: bitcode::Id,
+    left: &Value,
+    right: &Value,
+) -> Result<Value, Error> {
+    let width = module.scalar_width(result_type)?;
+    let total = components(left)
+        .iter()
+        .zip(components(right))
+        .map(|(left, right)| Ok(as_float(left)? * as_float(right)?))
+        .sum::<Result<f64, Error>>()?;
+
+    Ok(Value::from_bits(float_bits(total, width), width))
+}
+
+pub(crate) fn ext_inst(
+    module: &bitcode::Module,
+    result_type: bitcode::Id,
+    instruction: u32,
+    operands: &[Value],
+) -> Result<Value, Error> {
+    let instruction = bitcode::ExtInst::from_word(instruction)?;
+
+    if instruction == bitcode::ExtInst::Length {
+        return length(module, result_type, operands);
+    }
+
+    let component_type = module.component_type(result_type)?;
+    let lanes = operands
+        .iter()
+        .filter_map(|operand| match operand {
+            Value::Composite(members) => Some(members.len()),
+            _ => None,
+        })
+        .max();
+
+    match lanes {
+        None => ext_inst_scalar(module, component_type, instruction, operands),
+        Some(lanes) => Ok(Value::Composite(
+            (0..lanes)
+                .map(|lane| {
+                    let lane = operands
+                        .iter()
+                        .map(|operand| match operand {
+                            Value::Composite(members) => {
+                                members.get(lane).cloned().ok_or(Error::NotAComposite)
+                            }
+                            scalar => Ok(scalar.clone()),
+                        })
+                        .collect::<Result<Vec<_>, Error>>()?;
+
+                    ext_inst_scalar(module, component_type, instruction, &lane)
+                })
+                .collect::<Result<Vec<_>, Error>>()?,
+        )),
+    }
+}
+
+fn ext_inst_scalar(
+    module: &bitcode::Module,
+    component_type: bitcode::Id,
+    instruction: bitcode::ExtInst,
+    operands: &[Value],
+) -> Result<Value, Error> {
+    let width = module.scalar_width(component_type)?;
+    let operand = |index: usize| operands.get(index).ok_or(Error::UnsupportedOperation);
+    let float = |index: usize| as_float(operand(index)?);
+    let signed =
+        |index: usize| -> Result<i64, Error> { Ok(sign_extend(operand(index)?.as_bits()?, width)) };
+    let unsigned =
+        |index: usize| -> Result<u64, Error> { Ok(mask(operand(index)?.as_bits()?, width)) };
+
+    let result = match instruction {
+        bitcode::ExtInst::Fabs => float_bits(float(0)?.abs(), width),
+        bitcode::ExtInst::Log => float_bits(float(0)?.ln(), width),
+        bitcode::ExtInst::Sqrt => float_bits(float(0)?.sqrt(), width),
+        bitcode::ExtInst::Fmax => float_bits(float(0)?.max(float(1)?), width),
+        bitcode::ExtInst::Fmin => float_bits(float(0)?.min(float(1)?), width),
+        bitcode::ExtInst::Pow => float_bits(float(0)?.powf(float(1)?), width),
+        bitcode::ExtInst::Fma | bitcode::ExtInst::Mad => {
+            let (left, right, addend) = (float(0)?, float(1)?, float(2)?);
+
+            if width == 64 {
+                left.mul_add(right, addend).to_bits()
+            } else {
+                (left as f32).mul_add(right as f32, addend as f32).to_bits() as u64
+            }
+        }
+        bitcode::ExtInst::SAbs => mask(signed(0)?.unsigned_abs(), width),
+        bitcode::ExtInst::SMax => mask(signed(0)?.max(signed(1)?) as u64, width),
+        bitcode::ExtInst::SMin => mask(signed(0)?.min(signed(1)?) as u64, width),
+        bitcode::ExtInst::UMax => unsigned(0)?.max(unsigned(1)?),
+        bitcode::ExtInst::UMin => unsigned(0)?.min(unsigned(1)?),
+        bitcode::ExtInst::Length => return Err(Error::UnsupportedOperation),
+    };
+
+    Ok(Value::from_bits(result, width))
+}
+
+fn length(
+    module: &bitcode::Module,
+    result_type: bitcode::Id,
+    operands: &[Value],
+) -> Result<Value, Error> {
+    let width = module.scalar_width(result_type)?;
+    let operand = operands.first().ok_or(Error::UnsupportedOperation)?;
+    let total = components(operand)
+        .iter()
+        .map(|component| Ok(as_float(component)?.powi(2)))
+        .sum::<Result<f64, Error>>()?;
+
+    Ok(Value::from_bits(float_bits(total.sqrt(), width), width))
+}
+
+fn components(value: &Value) -> &[Value] {
+    match value {
+        Value::Composite(members) => members,
+        scalar => std::slice::from_ref(scalar),
+    }
+}
+
+fn as_float(value: &Value) -> Result<f64, Error> {
+    let bits = value.as_bits()?;
+
+    Ok(if operand_width(value) == 64 {
+        f64::from_bits(bits)
+    } else {
+        f32::from_bits(bits as u32) as f64
+    })
+}
+
+fn float_bits(value: f64, width: u32) -> u64 {
+    if width == 64 {
+        value.to_bits()
+    } else {
+        (value as f32).to_bits() as u64
+    }
+}
+
+fn modulo_with_sign(left: i64, right: i64) -> i64 {
+    let remainder = left.wrapping_rem(right);
+
+    if remainder != 0 && (remainder < 0) != (right < 0) {
+        remainder + right
+    } else {
+        remainder
+    }
 }
 
 fn operand_width(value: &Value) -> u32 {

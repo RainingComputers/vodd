@@ -16,6 +16,9 @@ pub enum Error {
     IncompleteInstruction,
     ZeroWordCount,
     NoSuchEntryPoint,
+    UnsupportedOpcode(u16),
+    UnsupportedExtInst(u32),
+    UnsupportedExtInstSet(Id),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +74,46 @@ impl Builtin {
             28 => Builtin::GlobalInvocationId,
             33 => Builtin::GlobalOffset,
             other => return Err(Error::UnsupportedBuiltin(other)),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtInst {
+    Fabs,
+    Fmax,
+    Fmin,
+    Fma,
+    Mad,
+    Log,
+    Pow,
+    Sqrt,
+    Length,
+    SAbs,
+    SMax,
+    UMax,
+    SMin,
+    UMin,
+}
+
+impl ExtInst {
+    pub(crate) fn from_word(word: u32) -> Result<ExtInst, Error> {
+        Ok(match word {
+            23 => ExtInst::Fabs,
+            26 => ExtInst::Fma,
+            27 => ExtInst::Fmax,
+            28 => ExtInst::Fmin,
+            37 => ExtInst::Log,
+            42 => ExtInst::Mad,
+            48 => ExtInst::Pow,
+            61 => ExtInst::Sqrt,
+            106 => ExtInst::Length,
+            141 => ExtInst::SAbs,
+            156 => ExtInst::SMax,
+            157 => ExtInst::UMax,
+            158 => ExtInst::SMin,
+            159 => ExtInst::UMin,
+            other => return Err(Error::UnsupportedExtInst(other)),
         })
     }
 }
@@ -169,6 +212,7 @@ pub struct Variable {
 pub struct EntryPoint {
     pub function: Id,
     pub name: String,
+    pub required_local_size: Option<[u32; 3]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +220,7 @@ pub enum UnaryOp {
     SNegate,
     FNegate,
     Not,
+    LogicalNot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,7 +228,11 @@ pub enum BinaryOp {
     IAdd,
     ISub,
     IMul,
+    UDiv,
+    SDiv,
     UMod,
+    SRem,
+    SMod,
     FAdd,
     FSub,
     FMul,
@@ -191,18 +240,68 @@ pub enum BinaryOp {
     FRem,
     FMod,
     ShiftLeftLogical,
+    ShiftRightLogical,
     ShiftRightArithmetic,
+    BitwiseOr,
+    BitwiseXor,
+    BitwiseAnd,
+    IEqual,
+    INotEqual,
     ULessThan,
     SLessThan,
-    INotEqual,
+    UGreaterThan,
+    SGreaterThan,
+    UGreaterThanEqual,
+    SGreaterThanEqual,
+    ULessThanEqual,
+    SLessThanEqual,
+    FOrdEqual,
+    FOrdNotEqual,
+    FOrdLessThan,
+    FOrdGreaterThan,
+    FOrdLessThanEqual,
+    FOrdGreaterThanEqual,
+    FUnordEqual,
+    FUnordNotEqual,
+    FUnordLessThan,
+    FUnordGreaterThan,
+    FUnordLessThanEqual,
+    FUnordGreaterThanEqual,
+    LogicalEqual,
+    LogicalNotEqual,
+    LogicalOr,
+    LogicalAnd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicOp {
+    Load,
+    Store,
+    Exchange,
+    CompareExchange,
+    Increment,
+    Decrement,
+    Add,
+    Sub,
+    SignedMin,
+    UnsignedMin,
+    SignedMax,
+    UnsignedMax,
+    And,
+    Or,
+    Xor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConvertOp {
     FToS,
     FToU,
+    SToF,
+    UToF,
     SConvert,
     UConvert,
+    FConvert,
+    Bitcast,
 }
 
 #[derive(Debug, Clone)]
@@ -275,6 +374,20 @@ pub enum Instruction {
         composite: Id,
         indices: Vec<u32>,
     },
+    CompositeInsert {
+        result: Id,
+        result_type: Id,
+        object: Id,
+        composite: Id,
+        indices: Vec<u32>,
+    },
+    VectorShuffle {
+        result: Id,
+        result_type: Id,
+        first: Id,
+        second: Id,
+        components: Vec<u32>,
+    },
     VectorExtractDynamic {
         result: Id,
         result_type: Id,
@@ -294,11 +407,25 @@ pub enum Instruction {
         vector: Id,
         scalar: Id,
     },
-    AtomicCounter {
+    Dot {
         result: Id,
         result_type: Id,
+        lhs: Id,
+        rhs: Id,
+    },
+    ExtInst {
+        result: Id,
+        result_type: Id,
+        set: Id,
+        instruction: u32,
+        operands: Vec<Id>,
+    },
+    Atomic {
+        result: Option<Id>,
+        operation: AtomicOp,
         pointer: Id,
-        increment: bool,
+        value: Option<Id>,
+        comparator: Option<Id>,
     },
     Phi {
         result: Id,
@@ -401,11 +528,16 @@ pub struct Module {
     entry_points: Vec<EntryPoint>,
     function_of_id: Vec<Option<usize>>,
     variable_of_id: Vec<Option<usize>>,
+    opencl_std: Option<Id>,
 }
 
 impl Module {
     pub fn bound(&self) -> usize {
         self.bound
+    }
+
+    pub fn opencl_std(&self) -> Option<Id> {
+        self.opencl_std
     }
 
     pub fn type_(&self, type_id: Id) -> Result<&Type, Error> {
@@ -441,6 +573,10 @@ impl Module {
             .ok_or(Error::NotAFunction(id))?;
 
         self.functions.get(index).ok_or(Error::NotAFunction(id))
+    }
+
+    pub fn entry_points(&self) -> &[EntryPoint] {
+        &self.entry_points
     }
 
     pub fn entry(&self, name: &str) -> Result<&Function, Error> {
@@ -538,6 +674,7 @@ impl ModuleBuilder {
                 entry_points: Vec::new(),
                 function_of_id: vec![None; bound],
                 variable_of_id: vec![None; bound],
+                opencl_std: None,
             },
         }
     }
@@ -628,8 +765,20 @@ impl ModuleBuilder {
         Ok(())
     }
 
+    pub fn set_opencl_std(&mut self, set: Id) {
+        self.module.opencl_std = Some(set);
+    }
+
     pub fn push_entry_point(&mut self, entry_point: EntryPoint) {
         self.module.entry_points.push(entry_point);
+    }
+
+    pub fn set_required_local_size(&mut self, function: Id, size: [u32; 3]) {
+        for entry in &mut self.module.entry_points {
+            if entry.function == function {
+                entry.required_local_size = Some(size);
+            }
+        }
     }
 
     pub fn push_function(&mut self, function: Function) -> Result<(), Error> {

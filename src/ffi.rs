@@ -63,8 +63,158 @@ pub(crate) fn event_id(handle: sys::cl_event) -> platform::EventId {
     platform::EventId::from_raw(object_id(handle))
 }
 
-pub(crate) unsafe fn host_pointer(pointer: *const core::ffi::c_void) -> platform::HostPointer {
-    unsafe { platform::HostPointer::new(pointer.cast_mut().cast()) }
+pub(crate) fn program_id(handle: sys::cl_program) -> platform::ProgramId {
+    platform::ProgramId::from_raw(object_id(handle))
+}
+
+pub(crate) fn kernel_id(handle: sys::cl_kernel) -> platform::KernelId {
+    platform::KernelId::from_raw(object_id(handle))
+}
+
+pub(crate) unsafe fn source(
+    count: sys::cl_uint,
+    strings: *mut *const core::ffi::c_char,
+    lengths: *const usize,
+) -> platform::Result<String> {
+    if strings.is_null() || count == 0 {
+        return Err(platform::Error::InvalidValue);
+    }
+
+    let listed = unsafe { core::slice::from_raw_parts(strings, count as usize) };
+    let sizes = (!lengths.is_null())
+        .then(|| unsafe { core::slice::from_raw_parts(lengths, count as usize) });
+
+    listed
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            if text.is_null() {
+                return Err(platform::Error::InvalidValue);
+            }
+
+            let bytes = match sizes.map(|sizes| sizes[index]) {
+                Some(0) | None => unsafe { core::ffi::CStr::from_ptr(*text) }.to_bytes(),
+                Some(length) => unsafe { core::slice::from_raw_parts(text.cast::<u8>(), length) },
+            };
+
+            Ok(String::from_utf8_lossy(bytes).into_owned())
+        })
+        .collect::<platform::Result<Vec<String>>>()
+        .map(|parts| parts.concat())
+}
+
+pub(crate) unsafe fn options(options: *const core::ffi::c_char) -> String {
+    if options.is_null() {
+        return String::new();
+    }
+
+    unsafe { core::ffi::CStr::from_ptr(options) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+pub(crate) unsafe fn binary(
+    num_devices: sys::cl_uint,
+    lengths: *const usize,
+    binaries: *mut *const sys::cl_uchar,
+) -> platform::Result<Vec<u8>> {
+    if num_devices == 0 || lengths.is_null() || binaries.is_null() {
+        return Err(platform::Error::InvalidValue);
+    }
+
+    let length = unsafe { *lengths };
+    let pointer = unsafe { *binaries };
+
+    if length == 0 || pointer.is_null() {
+        return Err(platform::Error::InvalidValue);
+    }
+
+    Ok(unsafe { core::slice::from_raw_parts(pointer, length) }.to_vec())
+}
+
+pub(crate) unsafe fn programs(
+    count: sys::cl_uint,
+    listed: *const sys::cl_program,
+) -> platform::Result<Vec<platform::ProgramId>> {
+    if listed.is_null() || count == 0 {
+        return Err(platform::Error::InvalidValue);
+    }
+
+    let listed = unsafe { core::slice::from_raw_parts(listed, count as usize) };
+
+    Ok(listed.iter().map(|handle| program_id(*handle)).collect())
+}
+
+pub(crate) unsafe fn headers(
+    count: sys::cl_uint,
+    programs: *const sys::cl_program,
+    names: *mut *const core::ffi::c_char,
+) -> platform::Result<Vec<(String, platform::ProgramId)>> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    if programs.is_null() || names.is_null() {
+        return Err(platform::Error::InvalidValue);
+    }
+
+    let programs = unsafe { core::slice::from_raw_parts(programs, count as usize) };
+    let names = unsafe { core::slice::from_raw_parts(names, count as usize) };
+
+    Ok(programs
+        .iter()
+        .zip(names)
+        .map(|(handle, name)| {
+            let text = unsafe { core::ffi::CStr::from_ptr(*name) }
+                .to_string_lossy()
+                .into_owned();
+
+            (text, program_id(*handle))
+        })
+        .collect())
+}
+
+pub(crate) unsafe fn geometry(
+    work_dim: sys::cl_uint,
+    global_work_offset: *const usize,
+    global_work_size: *const usize,
+    local_work_size: *const usize,
+) -> platform::Result<platform::Geometry> {
+    if !(1..=3).contains(&work_dim) {
+        return Err(platform::Error::InvalidWorkDimension);
+    }
+
+    if global_work_size.is_null() {
+        return Err(platform::Error::InvalidGlobalWorkSize);
+    }
+
+    let dimensions = work_dim as usize;
+    let read = |source: *const usize, fallback: u64| -> [u64; 3] {
+        let mut collected = [fallback; 3];
+
+        if !source.is_null() {
+            let listed = unsafe { core::slice::from_raw_parts(source, dimensions) };
+
+            for (slot, value) in collected.iter_mut().zip(listed) {
+                *slot = *value as u64;
+            }
+        }
+
+        collected
+    };
+
+    Ok(platform::Geometry {
+        dimensions: work_dim,
+        offset: read(global_work_offset, 0),
+        global: read(global_work_size, 1),
+        local: (!local_work_size.is_null()).then(|| read(local_work_size, 1)),
+    })
+}
+
+pub(crate) unsafe fn shared_memory_pointer(
+    pointer: *const core::ffi::c_void,
+) -> platform::SharedMemoryPointer {
+    unsafe { platform::SharedMemoryPointer::new(pointer.cast_mut().cast()) }
 }
 
 pub(crate) unsafe fn devices(
@@ -186,22 +336,17 @@ pub(crate) unsafe fn context_properties(
         return Ok(None);
     }
 
-    let mut listed = Vec::new();
+    let mut listed: Vec<[sys::cl_context_properties; 2]> = Vec::new();
     let mut cursor = properties;
 
     unsafe {
         while *cursor != 0 {
-            listed.push(*cursor);
-            cursor = cursor.add(1);
+            listed.push([*cursor, *cursor.add(1)]);
+            cursor = cursor.add(2);
         }
     }
 
-    let mut pairs = listed.chunks_exact(2);
-    if !pairs.remainder().is_empty() {
-        return Err(platform::Error::InvalidProperty);
-    }
-
-    let named: Vec<sys::cl_context_properties> = pairs.clone().map(|pair| pair[0]).collect();
+    let named: Vec<sys::cl_context_properties> = listed.iter().map(|pair| pair[0]).collect();
     if named
         .iter()
         .enumerate()
@@ -210,12 +355,10 @@ pub(crate) unsafe fn context_properties(
         return Err(platform::Error::InvalidProperty);
     }
 
-    pairs
-        .try_fold(Vec::new(), |mut decoded, pair| {
-            decoded.push(context_property(pair[0], pair[1])?);
-
-            Ok(decoded)
-        })
+    listed
+        .iter()
+        .map(|pair| context_property(pair[0], pair[1]))
+        .collect::<platform::Result<Vec<platform::ContextProperty>>>()
         .map(Some)
 }
 
@@ -315,7 +458,7 @@ pub(crate) unsafe fn mem_flags(
         return Err(platform::Error::InvalidHostPtr);
     }
 
-    let pointer = unsafe { host_pointer(host_ptr) };
+    let pointer = unsafe { shared_memory_pointer(host_ptr) };
 
     Ok(platform::MemFlags {
         access: match raw & access_group {
@@ -430,6 +573,7 @@ fn encode_status(status: platform::Status) -> sys::cl_int {
         platform::Status::Running => consts::CL_RUNNING,
         platform::Status::Complete => consts::CL_COMPLETE,
         platform::Status::Terminated(code) => code,
+        platform::Status::Failed(error) => code(error),
     }
 }
 
@@ -448,6 +592,9 @@ fn encode_command_type(command_type: platform::CommandType) -> sys::cl_command_t
         platform::CommandType::Marker => consts::CL_COMMAND_MARKER,
         platform::CommandType::Barrier => consts::CL_COMMAND_BARRIER,
         platform::CommandType::User => consts::CL_COMMAND_USER,
+        platform::CommandType::NdrangeKernel => consts::CL_COMMAND_NDRANGE_KERNEL,
+        platform::CommandType::Task => consts::CL_COMMAND_TASK,
+        platform::CommandType::NativeKernel => consts::CL_COMMAND_NATIVE_KERNEL,
     }
 }
 
@@ -483,6 +630,18 @@ pub(crate) unsafe fn event_notify(
             encode_status(status),
             carried.pointer(),
         );
+    }))
+}
+
+pub(crate) unsafe fn program_notify(
+    pfn_notify: Option<unsafe extern "C" fn(sys::cl_program, *mut core::ffi::c_void)>,
+    user_data: *mut core::ffi::c_void,
+) -> Option<platform::ProgramNotify> {
+    let notify = pfn_notify?;
+    let carried = UserData(user_data);
+
+    Some(Box::new(move |id: platform::ProgramId| unsafe {
+        notify(object_handle(id.into_raw()), carried.pointer());
     }))
 }
 
@@ -687,6 +846,62 @@ fn bits(flags: &[(bool, sys::cl_bitfield)]) -> sys::cl_bitfield {
         .fold(0, |raw, (_, bit)| raw | bit)
 }
 
+pub(crate) fn program_info(raw: sys::cl_program_info) -> platform::Result<platform::ProgramInfo> {
+    match raw {
+        consts::CL_PROGRAM_REFERENCE_COUNT => Ok(platform::ProgramInfo::ReferenceCount),
+        consts::CL_PROGRAM_CONTEXT => Ok(platform::ProgramInfo::Context),
+        consts::CL_PROGRAM_NUM_DEVICES => Ok(platform::ProgramInfo::NumDevices),
+        consts::CL_PROGRAM_DEVICES => Ok(platform::ProgramInfo::Devices),
+        consts::CL_PROGRAM_SOURCE => Ok(platform::ProgramInfo::Source),
+        consts::CL_PROGRAM_BINARY_SIZES => Ok(platform::ProgramInfo::BinarySizes),
+        consts::CL_PROGRAM_BINARIES => Ok(platform::ProgramInfo::Binaries),
+        consts::CL_PROGRAM_NUM_KERNELS => Ok(platform::ProgramInfo::NumKernels),
+        consts::CL_PROGRAM_KERNEL_NAMES => Ok(platform::ProgramInfo::KernelNames),
+        _ => Err(platform::Error::InvalidValue),
+    }
+}
+
+pub(crate) fn program_build_info(
+    raw: sys::cl_program_build_info,
+) -> platform::Result<platform::ProgramBuildInfo> {
+    match raw {
+        consts::CL_PROGRAM_BUILD_STATUS => Ok(platform::ProgramBuildInfo::Status),
+        consts::CL_PROGRAM_BUILD_OPTIONS => Ok(platform::ProgramBuildInfo::Options),
+        consts::CL_PROGRAM_BUILD_LOG => Ok(platform::ProgramBuildInfo::Log),
+        consts::CL_PROGRAM_BINARY_TYPE => Ok(platform::ProgramBuildInfo::BinaryType),
+        _ => Err(platform::Error::InvalidValue),
+    }
+}
+
+pub(crate) fn kernel_info(raw: sys::cl_kernel_info) -> platform::Result<platform::KernelInfo> {
+    match raw {
+        consts::CL_KERNEL_FUNCTION_NAME => Ok(platform::KernelInfo::FunctionName),
+        consts::CL_KERNEL_NUM_ARGS => Ok(platform::KernelInfo::NumArgs),
+        consts::CL_KERNEL_REFERENCE_COUNT => Ok(platform::KernelInfo::ReferenceCount),
+        consts::CL_KERNEL_CONTEXT => Ok(platform::KernelInfo::Context),
+        consts::CL_KERNEL_PROGRAM => Ok(platform::KernelInfo::Program),
+        consts::CL_KERNEL_ATTRIBUTES => Ok(platform::KernelInfo::Attributes),
+        _ => Err(platform::Error::InvalidValue),
+    }
+}
+
+pub(crate) fn kernel_work_group_info(
+    raw: sys::cl_kernel_work_group_info,
+) -> platform::Result<platform::KernelWorkGroupInfo> {
+    match raw {
+        consts::CL_KERNEL_WORK_GROUP_SIZE => Ok(platform::KernelWorkGroupInfo::WorkGroupSize),
+        consts::CL_KERNEL_COMPILE_WORK_GROUP_SIZE => {
+            Ok(platform::KernelWorkGroupInfo::CompileWorkGroupSize)
+        }
+        consts::CL_KERNEL_LOCAL_MEM_SIZE => Ok(platform::KernelWorkGroupInfo::LocalMemSize),
+        consts::CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE => {
+            Ok(platform::KernelWorkGroupInfo::PreferredWorkGroupSizeMultiple)
+        }
+        consts::CL_KERNEL_PRIVATE_MEM_SIZE => Ok(platform::KernelWorkGroupInfo::PrivateMemSize),
+        _ => Err(platform::Error::InvalidValue),
+    }
+}
+
 pub(crate) fn code(error: platform::Error) -> sys::cl_int {
     match error {
         platform::Error::DeviceNotFound => consts::CL_DEVICE_NOT_FOUND,
@@ -711,6 +926,36 @@ pub(crate) fn code(error: platform::Error) -> sys::cl_int {
         platform::Error::InvalidOperation => consts::CL_INVALID_OPERATION,
         platform::Error::InvalidBufferSize => consts::CL_INVALID_BUFFER_SIZE,
         platform::Error::InvalidProperty => consts::CL_INVALID_PROPERTY,
+        platform::Error::CompilerNotAvailable => consts::CL_COMPILER_NOT_AVAILABLE,
+        platform::Error::LinkerNotAvailable => consts::CL_LINKER_NOT_AVAILABLE,
+        platform::Error::OutOfResources => consts::CL_OUT_OF_RESOURCES,
+        platform::Error::ProfilingInfoNotAvailable => consts::CL_PROFILING_INFO_NOT_AVAILABLE,
+        platform::Error::BuildProgramFailure => consts::CL_BUILD_PROGRAM_FAILURE,
+        platform::Error::CompileProgramFailure => consts::CL_COMPILE_PROGRAM_FAILURE,
+        platform::Error::LinkProgramFailure => consts::CL_LINK_PROGRAM_FAILURE,
+        platform::Error::KernelArgInfoNotAvailable => consts::CL_KERNEL_ARG_INFO_NOT_AVAILABLE,
+        platform::Error::InvalidBinary => consts::CL_INVALID_BINARY,
+        platform::Error::InvalidBuildOptions => consts::CL_INVALID_BUILD_OPTIONS,
+        platform::Error::InvalidCompilerOptions => consts::CL_INVALID_COMPILER_OPTIONS,
+        platform::Error::InvalidLinkerOptions => consts::CL_INVALID_LINKER_OPTIONS,
+        platform::Error::InvalidProgram => consts::CL_INVALID_PROGRAM,
+        platform::Error::InvalidProgramExecutable => consts::CL_INVALID_PROGRAM_EXECUTABLE,
+        platform::Error::InvalidKernelName => consts::CL_INVALID_KERNEL_NAME,
+        platform::Error::InvalidKernelDefinition => consts::CL_INVALID_KERNEL_DEFINITION,
+        platform::Error::InvalidKernel => consts::CL_INVALID_KERNEL,
+        platform::Error::InvalidArgIndex => consts::CL_INVALID_ARG_INDEX,
+        platform::Error::InvalidArgValue => consts::CL_INVALID_ARG_VALUE,
+        platform::Error::InvalidArgSize => consts::CL_INVALID_ARG_SIZE,
+        platform::Error::InvalidKernelArgs => consts::CL_INVALID_KERNEL_ARGS,
+        platform::Error::InvalidWorkDimension => consts::CL_INVALID_WORK_DIMENSION,
+        platform::Error::InvalidWorkGroupSize => consts::CL_INVALID_WORK_GROUP_SIZE,
+        platform::Error::InvalidWorkItemSize => consts::CL_INVALID_WORK_ITEM_SIZE,
+        platform::Error::InvalidGlobalOffset => consts::CL_INVALID_GLOBAL_OFFSET,
+        platform::Error::InvalidGlobalWorkSize => consts::CL_INVALID_GLOBAL_WORK_SIZE,
+        platform::Error::InvalidSampler => consts::CL_INVALID_SAMPLER,
+        platform::Error::InvalidImageSize => consts::CL_INVALID_IMAGE_SIZE,
+        platform::Error::InvalidImageFormatDescriptor => consts::CL_INVALID_IMAGE_FORMAT_DESCRIPTOR,
+        platform::Error::ImageFormatNotSupported => consts::CL_IMAGE_FORMAT_NOT_SUPPORTED,
     }
 }
 
@@ -771,6 +1016,109 @@ where
     consts::CL_SUCCESS
 }
 
+pub(crate) unsafe fn kernel_argument(
+    kernel: platform::KernelId,
+    index: sys::cl_uint,
+    arg_size: usize,
+    arg_value: *const core::ffi::c_void,
+) -> platform::Result<platform::KernelArgument> {
+    match platform::Kernel::argument_kind(kernel, index)? {
+        platform::ArgumentKind::Local => {
+            if !arg_value.is_null() {
+                return Err(platform::Error::InvalidArgValue);
+            }
+
+            Ok(platform::KernelArgument::Local(arg_size))
+        }
+        platform::ArgumentKind::Global | platform::ArgumentKind::Constant => {
+            if arg_size != core::mem::size_of::<sys::cl_mem>() {
+                return Err(platform::Error::InvalidArgSize);
+            }
+
+            if arg_value.is_null() {
+                return Ok(platform::KernelArgument::Memory(None));
+            }
+
+            let handle = unsafe { *arg_value.cast::<sys::cl_mem>() };
+            if handle.is_null() {
+                return Ok(platform::KernelArgument::Memory(None));
+            }
+
+            Ok(platform::KernelArgument::Memory(Some(buffer_id(handle))))
+        }
+        platform::ArgumentKind::Value(expected) => {
+            if arg_size != expected || arg_value.is_null() {
+                return Err(platform::Error::InvalidArgSize);
+            }
+
+            Ok(platform::KernelArgument::Value(
+                unsafe { core::slice::from_raw_parts(arg_value.cast::<u8>(), arg_size) }.to_vec(),
+            ))
+        }
+    }
+}
+
+pub(crate) unsafe fn created(
+    kernels: platform::Result<Vec<platform::KernelId>>,
+    num_kernels: sys::cl_uint,
+    out: *mut sys::cl_kernel,
+    num_out: *mut sys::cl_uint,
+) -> sys::cl_int {
+    let kernels = match kernels {
+        Ok(kernels) => kernels,
+        Err(error) => return code(error),
+    };
+
+    if !out.is_null() && (num_kernels as usize) < kernels.len() {
+        return consts::CL_INVALID_VALUE;
+    }
+
+    let listed: Vec<sys::cl_kernel> = kernels
+        .iter()
+        .map(|id| object_handle(id.into_raw()))
+        .collect();
+
+    if out.is_null() {
+        for id in kernels {
+            let _released = platform::Kernel::release(id);
+        }
+    }
+
+    unsafe { write_handles(&listed, num_kernels, out, num_out) }
+}
+
+pub(crate) fn profiling_info(
+    raw: sys::cl_profiling_info,
+) -> platform::Result<platform::ProfilingInfo> {
+    match raw {
+        consts::CL_PROFILING_COMMAND_QUEUED => Ok(platform::ProfilingInfo::Queued),
+        consts::CL_PROFILING_COMMAND_SUBMIT => Ok(platform::ProfilingInfo::Submit),
+        consts::CL_PROFILING_COMMAND_START => Ok(platform::ProfilingInfo::Start),
+        consts::CL_PROFILING_COMMAND_END => Ok(platform::ProfilingInfo::End),
+        _ => Err(platform::Error::InvalidValue),
+    }
+}
+
+pub(crate) unsafe fn linked(
+    result: core::result::Result<platform::ProgramId, platform::LinkFailure>,
+    errcode_ret: *mut sys::cl_int,
+) -> sys::cl_program {
+    match result {
+        Ok(id) => {
+            unsafe { write_code(errcode_ret, consts::CL_SUCCESS) };
+
+            object_handle(id.into_raw())
+        }
+        Err(failure) => {
+            unsafe { write_code(errcode_ret, code(failure.error)) };
+
+            failure
+                .program
+                .map_or(core::ptr::null_mut(), |id| object_handle(id.into_raw()))
+        }
+    }
+}
+
 pub(crate) unsafe fn found(
     devices: platform::Result<Vec<platform::Device>>,
     num_entries: sys::cl_uint,
@@ -812,7 +1160,7 @@ pub(crate) unsafe fn map(
     blocking: sys::cl_bool,
     event: *mut sys::cl_event,
     errcode_ret: *mut sys::cl_int,
-    mapped: impl FnOnce() -> platform::Result<(platform::HostPointer, platform::EventId)>,
+    mapped: impl FnOnce() -> platform::Result<(platform::SharedMemoryPointer, platform::EventId)>,
 ) -> *mut core::ffi::c_void {
     let (pointer, id) = match mapped() {
         Ok(mapped) => mapped,
@@ -1029,6 +1377,57 @@ unsafe fn write_info(
                 v.map_or(core::ptr::null_mut(), |id| {
                     object_handle::<sys::_cl_command_queue>(id.into_raw())
                 }),
+                param_value_size,
+                param_value,
+                param_value_size_ret,
+            ),
+            platform::InfoValue::Binaries(v) => {
+                let pointers: Vec<*const u8> = v.iter().map(|binary| binary.as_ptr()).collect();
+
+                if !param_value.is_null() {
+                    let out = core::slice::from_raw_parts(
+                        param_value.cast::<*mut u8>(),
+                        v.len()
+                            .min(param_value_size / core::mem::size_of::<*mut u8>()),
+                    );
+
+                    for (binary, into) in v.iter().zip(out) {
+                        if !into.is_null() {
+                            core::ptr::copy_nonoverlapping(binary.as_ptr(), *into, binary.len());
+                        }
+                    }
+                }
+
+                if !param_value_size_ret.is_null() {
+                    *param_value_size_ret = core::mem::size_of_val(&pointers[..]);
+                }
+
+                consts::CL_SUCCESS
+            }
+            platform::InfoValue::BuildStatus(v) => {
+                let raw = match v {
+                    platform::BuildStatus::None => consts::CL_BUILD_NONE,
+                    platform::BuildStatus::Error => consts::CL_BUILD_ERROR,
+                    platform::BuildStatus::Success => consts::CL_BUILD_SUCCESS,
+                    platform::BuildStatus::InProgress => consts::CL_BUILD_IN_PROGRESS,
+                };
+
+                scalar(raw, param_value_size, param_value, param_value_size_ret)
+            }
+            platform::InfoValue::BinaryType(v) => {
+                let raw = match v {
+                    platform::BinaryType::None => consts::CL_PROGRAM_BINARY_TYPE_NONE,
+                    platform::BinaryType::CompiledObject => {
+                        consts::CL_PROGRAM_BINARY_TYPE_COMPILED_OBJECT
+                    }
+                    platform::BinaryType::Library => consts::CL_PROGRAM_BINARY_TYPE_LIBRARY,
+                    platform::BinaryType::Executable => consts::CL_PROGRAM_BINARY_TYPE_EXECUTABLE,
+                };
+
+                scalar(raw, param_value_size, param_value, param_value_size_ret)
+            }
+            platform::InfoValue::Program(v) => scalar(
+                object_handle::<sys::_cl_program>(v.into_raw()),
                 param_value_size,
                 param_value,
                 param_value_size_ret,

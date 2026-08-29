@@ -111,11 +111,30 @@ fn parse_inner(words: impl IntoIterator<Item = u32>) -> Result<bitcode::Module, 
                     _ => bitcode::Addressing::Logical,
                 });
             }
+            11 => {
+                let result = reader.word()?;
+                if reader.string() == "OpenCL.std" {
+                    module.set_opencl_std(result);
+                }
+            }
             15 => {
                 let _model = reader.word()?;
                 let function = reader.word()?;
                 let name = reader.string();
-                module.push_entry_point(bitcode::EntryPoint { function, name });
+                module.push_entry_point(bitcode::EntryPoint {
+                    function,
+                    name,
+                    required_local_size: None,
+                });
+            }
+            16 => {
+                let function = reader.word()?;
+                if reader.word()? == 17 {
+                    let x = reader.word()?;
+                    let y = reader.word()?;
+                    let z = reader.word()?;
+                    module.set_required_local_size(function, [x, y, z]);
+                }
             }
             71 => {
                 let target = reader.word()?;
@@ -222,6 +241,11 @@ fn parse_inner(words: impl IntoIterator<Item = u32>) -> Result<bitcode::Module, 
                 let result = reader.word()?;
                 module.set_constant(result, result_type, bitcode::ConstantKind::Null)?;
             }
+            1 if pending_block.is_none() => {
+                let result_type = reader.word()?;
+                let result = reader.word()?;
+                module.set_constant(result, result_type, bitcode::ConstantKind::Null)?;
+            }
             54 => {
                 let return_type = reader.word()?;
                 let result = reader.word()?;
@@ -319,10 +343,169 @@ fn parse_decoration<I: Iterator<Item = u32>>(
     })
 }
 
+fn unary_op(opcode: u16) -> Option<bitcode::UnaryOp> {
+    Some(match opcode {
+        126 => bitcode::UnaryOp::SNegate,
+        127 => bitcode::UnaryOp::FNegate,
+        168 => bitcode::UnaryOp::LogicalNot,
+        200 => bitcode::UnaryOp::Not,
+        _ => return None,
+    })
+}
+
+fn binary_op(opcode: u16) -> Option<bitcode::BinaryOp> {
+    Some(match opcode {
+        128 => bitcode::BinaryOp::IAdd,
+        129 => bitcode::BinaryOp::FAdd,
+        130 => bitcode::BinaryOp::ISub,
+        131 => bitcode::BinaryOp::FSub,
+        132 => bitcode::BinaryOp::IMul,
+        133 => bitcode::BinaryOp::FMul,
+        134 => bitcode::BinaryOp::UDiv,
+        135 => bitcode::BinaryOp::SDiv,
+        136 => bitcode::BinaryOp::FDiv,
+        137 => bitcode::BinaryOp::UMod,
+        138 => bitcode::BinaryOp::SRem,
+        139 => bitcode::BinaryOp::SMod,
+        140 => bitcode::BinaryOp::FRem,
+        141 => bitcode::BinaryOp::FMod,
+        164 => bitcode::BinaryOp::LogicalEqual,
+        165 => bitcode::BinaryOp::LogicalNotEqual,
+        166 => bitcode::BinaryOp::LogicalOr,
+        167 => bitcode::BinaryOp::LogicalAnd,
+        170 => bitcode::BinaryOp::IEqual,
+        171 => bitcode::BinaryOp::INotEqual,
+        172 => bitcode::BinaryOp::UGreaterThan,
+        173 => bitcode::BinaryOp::SGreaterThan,
+        174 => bitcode::BinaryOp::UGreaterThanEqual,
+        175 => bitcode::BinaryOp::SGreaterThanEqual,
+        176 => bitcode::BinaryOp::ULessThan,
+        177 => bitcode::BinaryOp::SLessThan,
+        178 => bitcode::BinaryOp::ULessThanEqual,
+        179 => bitcode::BinaryOp::SLessThanEqual,
+        180 => bitcode::BinaryOp::FOrdEqual,
+        181 => bitcode::BinaryOp::FUnordEqual,
+        182 => bitcode::BinaryOp::FOrdNotEqual,
+        183 => bitcode::BinaryOp::FUnordNotEqual,
+        184 => bitcode::BinaryOp::FOrdLessThan,
+        185 => bitcode::BinaryOp::FUnordLessThan,
+        186 => bitcode::BinaryOp::FOrdGreaterThan,
+        187 => bitcode::BinaryOp::FUnordGreaterThan,
+        188 => bitcode::BinaryOp::FOrdLessThanEqual,
+        189 => bitcode::BinaryOp::FUnordLessThanEqual,
+        190 => bitcode::BinaryOp::FOrdGreaterThanEqual,
+        191 => bitcode::BinaryOp::FUnordGreaterThanEqual,
+        194 => bitcode::BinaryOp::ShiftRightLogical,
+        195 => bitcode::BinaryOp::ShiftRightArithmetic,
+        196 => bitcode::BinaryOp::ShiftLeftLogical,
+        197 => bitcode::BinaryOp::BitwiseOr,
+        198 => bitcode::BinaryOp::BitwiseXor,
+        199 => bitcode::BinaryOp::BitwiseAnd,
+        _ => return None,
+    })
+}
+
+fn convert_op(opcode: u16) -> Option<bitcode::ConvertOp> {
+    Some(match opcode {
+        109 => bitcode::ConvertOp::FToU,
+        110 => bitcode::ConvertOp::FToS,
+        111 => bitcode::ConvertOp::SToF,
+        112 => bitcode::ConvertOp::UToF,
+        113 => bitcode::ConvertOp::UConvert,
+        114 => bitcode::ConvertOp::SConvert,
+        115 => bitcode::ConvertOp::FConvert,
+        117 | 120 | 121 | 122 | 124 => bitcode::ConvertOp::Bitcast,
+        _ => return None,
+    })
+}
+
+fn atomic_op(opcode: u16) -> Option<bitcode::AtomicOp> {
+    Some(match opcode {
+        227 => bitcode::AtomicOp::Load,
+        228 => bitcode::AtomicOp::Store,
+        229 => bitcode::AtomicOp::Exchange,
+        230 => bitcode::AtomicOp::CompareExchange,
+        232 => bitcode::AtomicOp::Increment,
+        233 => bitcode::AtomicOp::Decrement,
+        234 => bitcode::AtomicOp::Add,
+        235 => bitcode::AtomicOp::Sub,
+        236 => bitcode::AtomicOp::SignedMin,
+        237 => bitcode::AtomicOp::UnsignedMin,
+        238 => bitcode::AtomicOp::SignedMax,
+        239 => bitcode::AtomicOp::UnsignedMax,
+        240 => bitcode::AtomicOp::And,
+        241 => bitcode::AtomicOp::Or,
+        242 => bitcode::AtomicOp::Xor,
+        _ => return None,
+    })
+}
+
+fn parse_atomic<I: Iterator<Item = u32>>(
+    operation: bitcode::AtomicOp,
+    reader: &mut Reader<'_, I>,
+) -> Result<bitcode::Instruction, bitcode::Error> {
+    let result = match operation {
+        bitcode::AtomicOp::Store => None,
+        _ => {
+            let _result_type = reader.word()?;
+            Some(reader.word()?)
+        }
+    };
+
+    let pointer = reader.word()?;
+    let _memory_scope = reader.word()?;
+    let _memory_semantics = reader.word()?;
+
+    let (value, comparator) = match operation {
+        bitcode::AtomicOp::Load | bitcode::AtomicOp::Increment | bitcode::AtomicOp::Decrement => {
+            (None, None)
+        }
+        bitcode::AtomicOp::CompareExchange => {
+            let _unequal_semantics = reader.word()?;
+            let value = reader.word()?;
+            let comparator = reader.word()?;
+
+            (Some(value), Some(comparator))
+        }
+        _ => (Some(reader.word()?), None),
+    };
+
+    Ok(bitcode::Instruction::Atomic { result, operation, pointer, value, comparator })
+}
+
 fn parse_body<I: Iterator<Item = u32>>(
     opcode: u16,
     reader: &mut Reader<'_, I>,
 ) -> Result<bitcode::Instruction, bitcode::Error> {
+    if let Some(operation) = unary_op(opcode) {
+        let result_type = reader.word()?;
+        let result = reader.word()?;
+        let operand = reader.word()?;
+
+        return Ok(bitcode::Instruction::Unary { result, result_type, operation, operand });
+    }
+
+    if let Some(operation) = binary_op(opcode) {
+        let result_type = reader.word()?;
+        let result = reader.word()?;
+        let lhs = reader.word()?;
+        let rhs = reader.word()?;
+
+        return Ok(bitcode::Instruction::Binary { result, result_type, operation, lhs, rhs });
+    }
+
+    if let Some(operation) = atomic_op(opcode) {
+        return parse_atomic(operation, reader);
+    }
+
+    if let Some(operation) = convert_op(opcode) {
+        let result_type = reader.word()?;
+        let result = reader.word()?;
+        let operand = reader.word()?;
+
+        return Ok(bitcode::Instruction::Convert { result, result_type, operation, operand });
+    }
+
     Ok(match opcode {
         1 => {
             let result_type = reader.word()?;
@@ -354,53 +537,6 @@ fn parse_body<I: Iterator<Item = u32>>(
             let indices = reader.rest();
             bitcode::Instruction::AccessChain { result, result_type, base, indices, element: true }
         }
-        126 | 127 | 200 => {
-            let result_type = reader.word()?;
-            let result = reader.word()?;
-            let operand = reader.word()?;
-            let operation = match opcode {
-                126 => bitcode::UnaryOp::SNegate,
-                127 => bitcode::UnaryOp::FNegate,
-                _ => bitcode::UnaryOp::Not,
-            };
-            bitcode::Instruction::Unary { result, result_type, operation, operand }
-        }
-        128 | 129 | 130 | 131 | 132 | 133 | 136 | 137 | 140 | 141 | 171 | 176 | 177 | 195 | 196 => {
-            let result_type = reader.word()?;
-            let result = reader.word()?;
-            let lhs = reader.word()?;
-            let rhs = reader.word()?;
-            let operation = match opcode {
-                128 => bitcode::BinaryOp::IAdd,
-                129 => bitcode::BinaryOp::FAdd,
-                130 => bitcode::BinaryOp::ISub,
-                131 => bitcode::BinaryOp::FSub,
-                132 => bitcode::BinaryOp::IMul,
-                133 => bitcode::BinaryOp::FMul,
-                136 => bitcode::BinaryOp::FDiv,
-                137 => bitcode::BinaryOp::UMod,
-                140 => bitcode::BinaryOp::FRem,
-                141 => bitcode::BinaryOp::FMod,
-                171 => bitcode::BinaryOp::INotEqual,
-                176 => bitcode::BinaryOp::ULessThan,
-                177 => bitcode::BinaryOp::SLessThan,
-                195 => bitcode::BinaryOp::ShiftRightArithmetic,
-                _ => bitcode::BinaryOp::ShiftLeftLogical,
-            };
-            bitcode::Instruction::Binary { result, result_type, operation, lhs, rhs }
-        }
-        109 | 110 | 113 | 114 => {
-            let result_type = reader.word()?;
-            let result = reader.word()?;
-            let operand = reader.word()?;
-            let operation = match opcode {
-                109 => bitcode::ConvertOp::FToU,
-                110 => bitcode::ConvertOp::FToS,
-                113 => bitcode::ConvertOp::UConvert,
-                _ => bitcode::ConvertOp::SConvert,
-            };
-            bitcode::Instruction::Convert { result, result_type, operation, operand }
-        }
         169 => {
             let result_type = reader.word()?;
             let result = reader.word()?;
@@ -427,6 +563,28 @@ fn parse_body<I: Iterator<Item = u32>>(
             let composite = reader.word()?;
             let indices = reader.rest();
             bitcode::Instruction::CompositeExtract { result, result_type, composite, indices }
+        }
+        82 => {
+            let result_type = reader.word()?;
+            let result = reader.word()?;
+            let object = reader.word()?;
+            let composite = reader.word()?;
+            let indices = reader.rest();
+            bitcode::Instruction::CompositeInsert {
+                result,
+                result_type,
+                object,
+                composite,
+                indices,
+            }
+        }
+        79 => {
+            let result_type = reader.word()?;
+            let result = reader.word()?;
+            let first = reader.word()?;
+            let second = reader.word()?;
+            let components = reader.rest();
+            bitcode::Instruction::VectorShuffle { result, result_type, first, second, components }
         }
         77 => {
             let result_type = reader.word()?;
@@ -456,12 +614,20 @@ fn parse_body<I: Iterator<Item = u32>>(
             let scalar = reader.word()?;
             bitcode::Instruction::VectorTimesScalar { result, result_type, vector, scalar }
         }
-        232 | 233 => {
+        148 => {
             let result_type = reader.word()?;
             let result = reader.word()?;
-            let pointer = reader.word()?;
-            let increment = opcode == 232;
-            bitcode::Instruction::AtomicCounter { result, result_type, pointer, increment }
+            let lhs = reader.word()?;
+            let rhs = reader.word()?;
+            bitcode::Instruction::Dot { result, result_type, lhs, rhs }
+        }
+        12 => {
+            let result_type = reader.word()?;
+            let result = reader.word()?;
+            let set = reader.word()?;
+            let instruction = reader.word()?;
+            let operands = reader.rest();
+            bitcode::Instruction::ExtInst { result, result_type, set, instruction, operands }
         }
         245 => {
             let result_type = reader.word()?;
@@ -517,7 +683,8 @@ fn parse_body<I: Iterator<Item = u32>>(
             bitcode::Instruction::ReturnValue { value }
         }
         255 => bitcode::Instruction::Unreachable,
-        _ => bitcode::Instruction::Nop,
+        0 | 8 | 317 | 246 | 247 | 256 | 257 => bitcode::Instruction::Nop,
+        unsupported => return Err(bitcode::Error::UnsupportedOpcode(unsupported)),
     })
 }
 

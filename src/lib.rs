@@ -5,6 +5,7 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod bitcode;
+pub mod compiler;
 pub mod consts;
 pub mod ffi;
 pub mod interpreter;
@@ -276,7 +277,7 @@ pub unsafe extern "C" fn clCreateImage(
     host_ptr: *mut core::ffi::c_void,
     errcode_ret: *mut sys::cl_int,
 ) -> sys::cl_mem {
-    panic!("clCreateImage is not implemented");
+    unsafe { ffi::object(Err(platform::Error::InvalidOperation), errcode_ret) }
 }
 
 #[unsafe(no_mangle)]
@@ -298,7 +299,7 @@ pub unsafe extern "C" fn clGetSupportedImageFormats(
     image_formats: *mut sys::cl_image_format,
     num_image_formats: *mut sys::cl_uint,
 ) -> sys::cl_int {
-    panic!("clGetSupportedImageFormats is not implemented");
+    unsafe { ffi::write_handles(&[], num_entries, image_formats, num_image_formats) }
 }
 
 #[unsafe(no_mangle)]
@@ -328,7 +329,7 @@ pub unsafe extern "C" fn clGetImageInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> sys::cl_int {
-    panic!("clGetImageInfo is not implemented");
+    ffi::status(Err(platform::Error::InvalidMemObject))
 }
 
 #[unsafe(no_mangle)]
@@ -345,12 +346,12 @@ pub unsafe extern "C" fn clSetMemObjectDestructorCallback(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clRetainSampler(sampler: sys::cl_sampler) -> sys::cl_int {
-    panic!("clRetainSampler is not implemented");
+    ffi::status(Err(platform::Error::InvalidSampler))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clReleaseSampler(sampler: sys::cl_sampler) -> sys::cl_int {
-    panic!("clReleaseSampler is not implemented");
+    ffi::status(Err(platform::Error::InvalidSampler))
 }
 
 #[unsafe(no_mangle)]
@@ -361,7 +362,7 @@ pub unsafe extern "C" fn clGetSamplerInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> sys::cl_int {
-    panic!("clGetSamplerInfo is not implemented");
+    ffi::status(Err(platform::Error::InvalidSampler))
 }
 
 #[unsafe(no_mangle)]
@@ -372,7 +373,18 @@ pub unsafe extern "C" fn clCreateProgramWithSource(
     lengths: *const usize,
     errcode_ret: *mut sys::cl_int,
 ) -> sys::cl_program {
-    panic!("clCreateProgramWithSource is not implemented");
+    unsafe {
+        ffi::object(
+            (|| {
+                platform::Program::create_with_source(
+                    ffi::context_id(context),
+                    ffi::source(count, strings, lengths)?,
+                )
+                .map(platform::ProgramId::into_raw)
+            })(),
+            errcode_ret,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -381,11 +393,30 @@ pub unsafe extern "C" fn clCreateProgramWithBinary(
     num_devices: sys::cl_uint,
     device_list: *const sys::cl_device_id,
     lengths: *const usize,
-    binaries: *mut *const core::ffi::c_uchar,
+    binaries: *mut *const sys::cl_uchar,
     binary_status: *mut sys::cl_int,
     errcode_ret: *mut sys::cl_int,
 ) -> sys::cl_program {
-    panic!("clCreateProgramWithBinary is not implemented");
+    unsafe {
+        ffi::object(
+            (|| {
+                ffi::devices(num_devices, device_list)?;
+
+                let created = platform::Program::create_with_binary(
+                    ffi::context_id(context),
+                    ffi::binary(num_devices, lengths, binaries)?,
+                );
+
+                ffi::write_code(
+                    binary_status,
+                    ffi::status(created.as_ref().map(|_| ()).map_err(|error| *error)),
+                );
+
+                created.map(platform::ProgramId::into_raw)
+            })(),
+            errcode_ret,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -396,17 +427,17 @@ pub unsafe extern "C" fn clCreateProgramWithBuiltInKernels(
     kernel_names: *const core::ffi::c_char,
     errcode_ret: *mut sys::cl_int,
 ) -> sys::cl_program {
-    panic!("clCreateProgramWithBuiltInKernels is not implemented");
+    unsafe { ffi::object(Err(platform::Error::InvalidValue), errcode_ret) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clRetainProgram(program: sys::cl_program) -> sys::cl_int {
-    panic!("clRetainProgram is not implemented");
+    ffi::status(platform::Program::retain(ffi::program_id(program)))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clReleaseProgram(program: sys::cl_program) -> sys::cl_int {
-    panic!("clReleaseProgram is not implemented");
+    ffi::status(platform::Program::release(ffi::program_id(program)))
 }
 
 #[unsafe(no_mangle)]
@@ -418,7 +449,13 @@ pub unsafe extern "C" fn clBuildProgram(
     pfn_notify: Option<unsafe extern "C" fn(sys::cl_program, *mut core::ffi::c_void)>,
     user_data: *mut core::ffi::c_void,
 ) -> sys::cl_int {
-    panic!("clBuildProgram is not implemented");
+    ffi::status(unsafe {
+        platform::Program::build(
+            ffi::program_id(program),
+            ffi::options(options),
+            ffi::program_notify(pfn_notify, user_data),
+        )
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -433,7 +470,14 @@ pub unsafe extern "C" fn clCompileProgram(
     pfn_notify: Option<unsafe extern "C" fn(sys::cl_program, *mut core::ffi::c_void)>,
     user_data: *mut core::ffi::c_void,
 ) -> sys::cl_int {
-    panic!("clCompileProgram is not implemented");
+    ffi::status((|| unsafe {
+        platform::Program::compile(
+            ffi::program_id(program),
+            ffi::options(options),
+            ffi::headers(num_input_headers, input_headers, header_include_names)?,
+            ffi::program_notify(pfn_notify, user_data),
+        )
+    })())
 }
 
 #[unsafe(no_mangle)]
@@ -448,12 +492,26 @@ pub unsafe extern "C" fn clLinkProgram(
     user_data: *mut core::ffi::c_void,
     errcode_ret: *mut sys::cl_int,
 ) -> sys::cl_program {
-    panic!("clLinkProgram is not implemented");
+    unsafe {
+        ffi::linked(
+            ffi::programs(num_input_programs, input_programs)
+                .map_err(|error| platform::LinkFailure { program: None, error })
+                .and_then(|inputs| {
+                    platform::Program::link(
+                        ffi::context_id(context),
+                        ffi::options(options),
+                        inputs,
+                        ffi::program_notify(pfn_notify, user_data),
+                    )
+                }),
+            errcode_ret,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clUnloadPlatformCompiler(platform: sys::cl_platform_id) -> sys::cl_int {
-    panic!("clUnloadPlatformCompiler is not implemented");
+    ffi::status(ffi::platform_id(platform))
 }
 
 #[unsafe(no_mangle)]
@@ -464,7 +522,15 @@ pub unsafe extern "C" fn clGetProgramInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> sys::cl_int {
-    panic!("clGetProgramInfo is not implemented");
+    unsafe {
+        ffi::info(
+            ffi::program_info(param_name)
+                .and_then(|param| platform::Program::info(ffi::program_id(program), param)),
+            param_value_size,
+            param_value,
+            param_value_size_ret,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -476,7 +542,16 @@ pub unsafe extern "C" fn clGetProgramBuildInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> sys::cl_int {
-    panic!("clGetProgramBuildInfo is not implemented");
+    unsafe {
+        ffi::info(
+            ffi::device(device)
+                .and_then(|_| ffi::program_build_info(param_name))
+                .and_then(|param| platform::Program::build_info(ffi::program_id(program), param)),
+            param_value_size,
+            param_value,
+            param_value_size_ret,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -485,7 +560,19 @@ pub unsafe extern "C" fn clCreateKernel(
     kernel_name: *const core::ffi::c_char,
     errcode_ret: *mut sys::cl_int,
 ) -> sys::cl_kernel {
-    panic!("clCreateKernel is not implemented");
+    unsafe {
+        ffi::object(
+            (|| {
+                if kernel_name.is_null() {
+                    return Err(platform::Error::InvalidValue);
+                }
+
+                platform::Kernel::create(ffi::program_id(program), ffi::options(kernel_name))
+                    .map(platform::KernelId::into_raw)
+            })(),
+            errcode_ret,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -495,17 +582,24 @@ pub unsafe extern "C" fn clCreateKernelsInProgram(
     kernels: *mut sys::cl_kernel,
     num_kernels_ret: *mut sys::cl_uint,
 ) -> sys::cl_int {
-    panic!("clCreateKernelsInProgram is not implemented");
+    unsafe {
+        ffi::created(
+            platform::Kernel::create_all(ffi::program_id(program)),
+            num_kernels,
+            kernels,
+            num_kernels_ret,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clRetainKernel(kernel: sys::cl_kernel) -> sys::cl_int {
-    panic!("clRetainKernel is not implemented");
+    ffi::status(platform::Kernel::retain(ffi::kernel_id(kernel)))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clReleaseKernel(kernel: sys::cl_kernel) -> sys::cl_int {
-    panic!("clReleaseKernel is not implemented");
+    ffi::status(platform::Kernel::release(ffi::kernel_id(kernel)))
 }
 
 #[unsafe(no_mangle)]
@@ -515,7 +609,13 @@ pub unsafe extern "C" fn clSetKernelArg(
     arg_size: usize,
     arg_value: *const core::ffi::c_void,
 ) -> sys::cl_int {
-    panic!("clSetKernelArg is not implemented");
+    ffi::status((|| unsafe {
+        platform::Kernel::set_argument(
+            ffi::kernel_id(kernel),
+            arg_index,
+            ffi::kernel_argument(ffi::kernel_id(kernel), arg_index, arg_size, arg_value)?,
+        )
+    })())
 }
 
 #[unsafe(no_mangle)]
@@ -526,7 +626,15 @@ pub unsafe extern "C" fn clGetKernelInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> sys::cl_int {
-    panic!("clGetKernelInfo is not implemented");
+    unsafe {
+        ffi::info(
+            ffi::kernel_info(param_name)
+                .and_then(|param| platform::Kernel::info(ffi::kernel_id(kernel), param)),
+            param_value_size,
+            param_value,
+            param_value_size_ret,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -538,7 +646,10 @@ pub unsafe extern "C" fn clGetKernelArgInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> sys::cl_int {
-    panic!("clGetKernelArgInfo is not implemented");
+    ffi::status(
+        platform::Kernel::exists(ffi::kernel_id(kernel))
+            .and(Err(platform::Error::KernelArgInfoNotAvailable)),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -550,7 +661,16 @@ pub unsafe extern "C" fn clGetKernelWorkGroupInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> sys::cl_int {
-    panic!("clGetKernelWorkGroupInfo is not implemented");
+    unsafe {
+        ffi::info(
+            ffi::device(device)
+                .and_then(|_| ffi::kernel_work_group_info(param_name))
+                .and_then(|param| platform::Kernel::work_group_info(ffi::kernel_id(kernel), param)),
+            param_value_size,
+            param_value,
+            param_value_size_ret,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -640,7 +760,15 @@ pub unsafe extern "C" fn clGetEventProfilingInfo(
     param_value: *mut core::ffi::c_void,
     param_value_size_ret: *mut usize,
 ) -> sys::cl_int {
-    panic!("clGetEventProfilingInfo is not implemented");
+    unsafe {
+        ffi::info(
+            ffi::profiling_info(param_name)
+                .and_then(|param| platform::Event::profiling_info(ffi::event_id(event), param)),
+            param_value_size,
+            param_value,
+            param_value_size_ret,
+        )
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -672,7 +800,7 @@ pub unsafe extern "C" fn clEnqueueReadBuffer(
                 ffi::buffer_id(buffer),
                 offset,
                 size,
-                ffi::host_pointer(ptr),
+                ffi::shared_memory_pointer(ptr),
                 ffi::event_wait_list(num_events_in_wait_list, event_wait_list)?,
             )
         })
@@ -707,7 +835,7 @@ pub unsafe extern "C" fn clEnqueueReadBufferRect(
                     buffer_slice_pitch,
                 ),
                 platform::Slab::rect(
-                    platform::Target::Host(ffi::host_pointer(ptr)),
+                    platform::Target::Host(ffi::shared_memory_pointer(ptr)),
                     ffi::region(host_origin)?,
                     host_row_pitch,
                     host_slice_pitch,
@@ -739,7 +867,7 @@ pub unsafe extern "C" fn clEnqueueWriteBuffer(
                 ffi::buffer_id(buffer),
                 offset,
                 size,
-                ffi::host_pointer(ptr),
+                ffi::shared_memory_pointer(ptr),
                 ffi::event_wait_list(num_events_in_wait_list, event_wait_list)?,
             )
         })
@@ -768,7 +896,7 @@ pub unsafe extern "C" fn clEnqueueWriteBufferRect(
             platform::CommandQueue::transfer(
                 ffi::queue_id(command_queue),
                 platform::Slab::rect(
-                    platform::Target::Host(ffi::host_pointer(ptr)),
+                    platform::Target::Host(ffi::shared_memory_pointer(ptr)),
                     ffi::region(host_origin)?,
                     host_row_pitch,
                     host_slice_pitch,
@@ -894,7 +1022,7 @@ pub unsafe extern "C" fn clEnqueueReadImage(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueReadImage is not implemented");
+    ffi::status(Err(platform::Error::InvalidOperation))
 }
 
 #[unsafe(no_mangle)]
@@ -911,7 +1039,7 @@ pub unsafe extern "C" fn clEnqueueWriteImage(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueWriteImage is not implemented");
+    ffi::status(Err(platform::Error::InvalidOperation))
 }
 
 #[unsafe(no_mangle)]
@@ -925,7 +1053,7 @@ pub unsafe extern "C" fn clEnqueueFillImage(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueFillImage is not implemented");
+    ffi::status(Err(platform::Error::InvalidOperation))
 }
 
 #[unsafe(no_mangle)]
@@ -940,7 +1068,7 @@ pub unsafe extern "C" fn clEnqueueCopyImage(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueCopyImage is not implemented");
+    ffi::status(Err(platform::Error::InvalidOperation))
 }
 
 #[unsafe(no_mangle)]
@@ -955,7 +1083,7 @@ pub unsafe extern "C" fn clEnqueueCopyImageToBuffer(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueCopyImageToBuffer is not implemented");
+    ffi::status(Err(platform::Error::InvalidOperation))
 }
 
 #[unsafe(no_mangle)]
@@ -970,7 +1098,7 @@ pub unsafe extern "C" fn clEnqueueCopyBufferToImage(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueCopyBufferToImage is not implemented");
+    ffi::status(Err(platform::Error::InvalidOperation))
 }
 
 #[unsafe(no_mangle)]
@@ -1015,7 +1143,11 @@ pub unsafe extern "C" fn clEnqueueMapImage(
     event: *mut sys::cl_event,
     errcode_ret: *mut sys::cl_int,
 ) -> *mut core::ffi::c_void {
-    panic!("clEnqueueMapImage is not implemented");
+    unsafe {
+        ffi::map(blocking_map, event, errcode_ret, || {
+            Err(platform::Error::InvalidOperation)
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -1032,7 +1164,7 @@ pub unsafe extern "C" fn clEnqueueUnmapMemObject(
             platform::CommandQueue::unmap(
                 ffi::queue_id(command_queue),
                 ffi::buffer_id(memobj),
-                ffi::host_pointer(mapped_ptr),
+                ffi::shared_memory_pointer(mapped_ptr),
                 ffi::event_wait_list(num_events_in_wait_list, event_wait_list)?,
             )
         })
@@ -1073,7 +1205,21 @@ pub unsafe extern "C" fn clEnqueueNDRangeKernel(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueNDRangeKernel is not implemented");
+    unsafe {
+        ffi::enqueue(consts::CL_FALSE, event, || {
+            platform::CommandQueue::ndrange(
+                ffi::queue_id(command_queue),
+                ffi::kernel_id(kernel),
+                ffi::geometry(
+                    work_dim,
+                    global_work_offset,
+                    global_work_size,
+                    local_work_size,
+                )?,
+                ffi::event_wait_list(num_events_in_wait_list, event_wait_list)?,
+            )
+        })
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -1089,7 +1235,7 @@ pub unsafe extern "C" fn clEnqueueNativeKernel(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueNativeKernel is not implemented");
+    ffi::status(Err(platform::Error::InvalidOperation))
 }
 
 #[unsafe(no_mangle)]
@@ -1145,7 +1291,7 @@ pub unsafe extern "C" fn clCreateImage2D(
     host_ptr: *mut core::ffi::c_void,
     errcode_ret: *mut sys::cl_int,
 ) -> sys::cl_mem {
-    panic!("clCreateImage2D is not implemented");
+    unsafe { ffi::object(Err(platform::Error::InvalidOperation), errcode_ret) }
 }
 
 #[unsafe(no_mangle)]
@@ -1161,7 +1307,7 @@ pub unsafe extern "C" fn clCreateImage3D(
     host_ptr: *mut core::ffi::c_void,
     errcode_ret: *mut sys::cl_int,
 ) -> sys::cl_mem {
-    panic!("clCreateImage3D is not implemented");
+    unsafe { ffi::object(Err(platform::Error::InvalidOperation), errcode_ret) }
 }
 
 #[unsafe(no_mangle)]
@@ -1169,7 +1315,7 @@ pub unsafe extern "C" fn clEnqueueMarker(
     command_queue: sys::cl_command_queue,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueMarker is not implemented");
+    unsafe { clEnqueueMarkerWithWaitList(command_queue, 0, core::ptr::null(), event) }
 }
 
 #[unsafe(no_mangle)]
@@ -1178,17 +1324,21 @@ pub unsafe extern "C" fn clEnqueueWaitForEvents(
     num_events: sys::cl_uint,
     event_list: *const sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueWaitForEvents is not implemented");
+    unsafe {
+        clEnqueueBarrierWithWaitList(command_queue, num_events, event_list, core::ptr::null_mut())
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clEnqueueBarrier(command_queue: sys::cl_command_queue) -> sys::cl_int {
-    panic!("clEnqueueBarrier is not implemented");
+    unsafe {
+        clEnqueueBarrierWithWaitList(command_queue, 0, core::ptr::null(), core::ptr::null_mut())
+    }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clUnloadCompiler() -> sys::cl_int {
-    panic!("clUnloadCompiler is not implemented");
+    consts::CL_SUCCESS
 }
 
 #[unsafe(no_mangle)]
@@ -1228,7 +1378,7 @@ pub unsafe extern "C" fn clCreateSampler(
     filter_mode: sys::cl_filter_mode,
     errcode_ret: *mut sys::cl_int,
 ) -> sys::cl_sampler {
-    panic!("clCreateSampler is not implemented");
+    unsafe { ffi::object(Err(platform::Error::InvalidOperation), errcode_ret) }
 }
 
 #[unsafe(no_mangle)]
@@ -1239,5 +1389,321 @@ pub unsafe extern "C" fn clEnqueueTask(
     event_wait_list: *const sys::cl_event,
     event: *mut sys::cl_event,
 ) -> sys::cl_int {
-    panic!("clEnqueueTask is not implemented");
+    unsafe {
+        ffi::enqueue(consts::CL_FALSE, event, || {
+            platform::CommandQueue::task(
+                ffi::queue_id(command_queue),
+                ffi::kernel_id(kernel),
+                ffi::event_wait_list(num_events_in_wait_list, event_wait_list)?,
+            )
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clCreateProgramWithIL(
+    context: sys::cl_context,
+    il: *const core::ffi::c_void,
+    length: usize,
+    errcode_ret: *mut sys::cl_int,
+) -> sys::cl_program {
+    unsafe { ffi::object(Err(platform::Error::InvalidOperation), errcode_ret) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clCreateCommandQueueWithProperties(
+    context: sys::cl_context,
+    device: sys::cl_device_id,
+    properties: *const sys::cl_properties,
+    errcode_ret: *mut sys::cl_int,
+) -> sys::cl_command_queue {
+    unsafe { ffi::object(Err(platform::Error::InvalidOperation), errcode_ret) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clCreateBufferWithProperties(
+    context: sys::cl_context,
+    properties: *const sys::cl_properties,
+    flags: sys::cl_mem_flags,
+    size: usize,
+    host_ptr: *mut core::ffi::c_void,
+    errcode_ret: *mut sys::cl_int,
+) -> sys::cl_mem {
+    unsafe { ffi::object(Err(platform::Error::InvalidOperation), errcode_ret) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clCreateImageWithProperties(
+    context: sys::cl_context,
+    properties: *const sys::cl_properties,
+    flags: sys::cl_mem_flags,
+    image_format: *const sys::cl_image_format,
+    image_desc: *const sys::cl_image_desc,
+    host_ptr: *mut core::ffi::c_void,
+    errcode_ret: *mut sys::cl_int,
+) -> sys::cl_mem {
+    unsafe { ffi::object(Err(platform::Error::InvalidOperation), errcode_ret) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clCreateSamplerWithProperties(
+    context: sys::cl_context,
+    sampler_properties: *const sys::cl_properties,
+    errcode_ret: *mut sys::cl_int,
+) -> sys::cl_sampler {
+    unsafe { ffi::object(Err(platform::Error::InvalidOperation), errcode_ret) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clCreatePipe(
+    context: sys::cl_context,
+    flags: sys::cl_mem_flags,
+    pipe_packet_size: sys::cl_uint,
+    pipe_max_packets: sys::cl_uint,
+    properties: *const sys::cl_properties,
+    errcode_ret: *mut sys::cl_int,
+) -> sys::cl_mem {
+    unsafe { ffi::object(Err(platform::Error::InvalidOperation), errcode_ret) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clCloneKernel(
+    source_kernel: sys::cl_kernel,
+    errcode_ret: *mut sys::cl_int,
+) -> sys::cl_kernel {
+    unsafe { ffi::object(Err(platform::Error::InvalidOperation), errcode_ret) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clSVMAlloc(
+    context: sys::cl_context,
+    flags: sys::cl_mem_flags,
+    size: usize,
+    alignment: sys::cl_uint,
+) -> *mut core::ffi::c_void {
+    core::ptr::null_mut()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clSVMFree(context: sys::cl_context, svm_pointer: *mut core::ffi::c_void) {}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clGetPipeInfo(
+    pipe: sys::cl_mem,
+    param_name: sys::cl_uint,
+    param_value_size: usize,
+    param_value: *mut core::ffi::c_void,
+    param_value_size_ret: *mut usize,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidMemObject))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clGetKernelSubGroupInfo(
+    kernel: sys::cl_kernel,
+    device: sys::cl_device_id,
+    param_name: sys::cl_uint,
+    input_value_size: usize,
+    input_value: *const core::ffi::c_void,
+    param_value_size: usize,
+    param_value: *mut core::ffi::c_void,
+    param_value_size_ret: *mut usize,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidOperation))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clSetKernelArgSVMPointer(
+    kernel: sys::cl_kernel,
+    arg_index: sys::cl_uint,
+    arg_value: *const core::ffi::c_void,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidOperation))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clSetKernelExecInfo(
+    kernel: sys::cl_kernel,
+    param_name: sys::cl_uint,
+    param_value_size: usize,
+    param_value: *const core::ffi::c_void,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidOperation))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clSetDefaultDeviceCommandQueue(
+    context: sys::cl_context,
+    device: sys::cl_device_id,
+    command_queue: sys::cl_command_queue,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidOperation))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clSetProgramReleaseCallback(
+    program: sys::cl_program,
+    pfn_notify: Option<unsafe extern "C" fn(sys::cl_program, *mut core::ffi::c_void)>,
+    user_data: *mut core::ffi::c_void,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidOperation))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clSetProgramSpecializationConstant(
+    program: sys::cl_program,
+    spec_id: sys::cl_uint,
+    spec_size: usize,
+    spec_value: *const core::ffi::c_void,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidOperation))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clSetContextDestructorCallback(
+    context: sys::cl_context,
+    pfn_notify: Option<unsafe extern "C" fn(sys::cl_context, *mut core::ffi::c_void)>,
+    user_data: *mut core::ffi::c_void,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidOperation))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clSetCommandQueueProperty(
+    command_queue: sys::cl_command_queue,
+    properties: sys::cl_command_queue_properties,
+    enable: sys::cl_bool,
+    old_properties: *mut sys::cl_command_queue_properties,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidOperation))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clGetDeviceAndHostTimer(
+    device: sys::cl_device_id,
+    device_timestamp: *mut sys::cl_ulong,
+    host_timestamp: *mut sys::cl_ulong,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidOperation))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clGetHostTimer(
+    device: sys::cl_device_id,
+    host_timestamp: *mut sys::cl_ulong,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidOperation))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clEnqueueSVMFree(
+    command_queue: sys::cl_command_queue,
+    num_svm_pointers: sys::cl_uint,
+    svm_pointers: *mut *mut core::ffi::c_void,
+    pfn_free_func: *mut core::ffi::c_void,
+    user_data: *mut core::ffi::c_void,
+    num_events_in_wait_list: sys::cl_uint,
+    event_wait_list: *const sys::cl_event,
+    event: *mut sys::cl_event,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidOperation))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clEnqueueSVMMemcpy(
+    command_queue: sys::cl_command_queue,
+    blocking_copy: sys::cl_bool,
+    dst_ptr: *mut core::ffi::c_void,
+    src_ptr: *const core::ffi::c_void,
+    size: usize,
+    num_events_in_wait_list: sys::cl_uint,
+    event_wait_list: *const sys::cl_event,
+    event: *mut sys::cl_event,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidOperation))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clEnqueueSVMMemFill(
+    command_queue: sys::cl_command_queue,
+    svm_ptr: *mut core::ffi::c_void,
+    pattern: *const core::ffi::c_void,
+    pattern_size: usize,
+    size: usize,
+    num_events_in_wait_list: sys::cl_uint,
+    event_wait_list: *const sys::cl_event,
+    event: *mut sys::cl_event,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidOperation))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clEnqueueSVMMap(
+    command_queue: sys::cl_command_queue,
+    blocking_map: sys::cl_bool,
+    flags: sys::cl_map_flags,
+    svm_ptr: *mut core::ffi::c_void,
+    size: usize,
+    num_events_in_wait_list: sys::cl_uint,
+    event_wait_list: *const sys::cl_event,
+    event: *mut sys::cl_event,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidOperation))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clEnqueueSVMUnmap(
+    command_queue: sys::cl_command_queue,
+    svm_ptr: *mut core::ffi::c_void,
+    num_events_in_wait_list: sys::cl_uint,
+    event_wait_list: *const sys::cl_event,
+    event: *mut sys::cl_event,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidOperation))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clEnqueueSVMMigrateMem(
+    command_queue: sys::cl_command_queue,
+    num_svm_pointers: sys::cl_uint,
+    svm_pointers: *const *const core::ffi::c_void,
+    sizes: *const usize,
+    flags: sys::cl_mem_migration_flags,
+    num_events_in_wait_list: sys::cl_uint,
+    event_wait_list: *const sys::cl_event,
+    event: *mut sys::cl_event,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidOperation))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clGetKernelSuggestedLocalWorkSizeKHR(
+    command_queue: sys::cl_command_queue,
+    kernel: sys::cl_kernel,
+    work_dim: sys::cl_uint,
+    global_work_offset: *const usize,
+    global_work_size: *const usize,
+    suggested_local_work_size: *mut usize,
+) -> sys::cl_int {
+    ffi::status(Err(platform::Error::InvalidOperation))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clCreateProgramWithILKHR(
+    context: sys::cl_context,
+    il: *const core::ffi::c_void,
+    length: usize,
+    errcode_ret: *mut sys::cl_int,
+) -> sys::cl_program {
+    unsafe { ffi::object(Err(platform::Error::InvalidOperation), errcode_ret) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clCreateCommandQueueWithPropertiesKHR(
+    context: sys::cl_context,
+    device: sys::cl_device_id,
+    properties: *const sys::cl_properties,
+    errcode_ret: *mut sys::cl_int,
+) -> sys::cl_command_queue {
+    unsafe { ffi::object(Err(platform::Error::InvalidOperation), errcode_ret) }
 }

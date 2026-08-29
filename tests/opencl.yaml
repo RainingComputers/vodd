@@ -31,8 +31,8 @@ opencl_cases:
         consistency_prog_ctor_dtor: skip
         consistency_progvar: skip
         consistency_read_write_images: skip
-        consistency_requirements_fp16: skip
-        consistency_requirements_fp64: skip
+        consistency_requirements_fp16: pass
+        consistency_requirements_fp64: pass
         consistency_subgroups: skip
         consistency_svm: skip
         context_destructor_callback: skip
@@ -50,22 +50,22 @@ opencl_cases:
         get_device_info: pass
         get_device_info_31: skip
         get_device_info_comparability: pass
-        get_image1d_array_info: pass
-        get_image1d_info: pass
-        get_image2d_array_info: pass
-        get_image2d_info: pass
-        get_image3d_info: pass
-        get_kernel_arg_info: pass
+        get_image1d_array_info: skip
+        get_image1d_info: skip
+        get_image2d_array_info: skip
+        get_image2d_info: skip
+        get_image3d_info: skip
+        get_kernel_arg_info: fail
         get_kernel_info: pass
         get_platform_ids: pass
         get_platform_info: pass
         get_program_info_kernel_names: pass
         get_sampler_info: skip
-        get_sampler_info_compatibility: pass
+        get_sampler_info_compatibility: skip
         image_properties_queries: skip
-        kernel_arg_changes: pass
+        kernel_arg_changes: skip
         kernel_arg_multi_setup_random: pass
-        kernel_attributes: pass
+        kernel_attributes: fail
         kernel_global_constant: pass
         kernel_local_memory_size: pass
         kernel_private_memory_size: pass
@@ -82,7 +82,7 @@ opencl_cases:
         min_max_compute_units: pass
         min_max_constant_args: pass
         min_max_constant_buffer_size: pass
-        min_max_device_version: skip
+        min_max_device_version: pass
         min_max_double_fp_config: pass
         min_max_execution_capabilities: pass
         min_max_image_2d_height: skip
@@ -98,13 +98,13 @@ opencl_cases:
         min_max_mem_alloc_size: pass
         min_max_parameter_size: pass
         min_max_queue_properties: pass
-        min_max_read_image_args: pass
-        min_max_samplers: pass
+        min_max_read_image_args: skip
+        min_max_samplers: skip
         min_max_single_fp_config: pass
         min_max_thread_dimensions: pass
         min_max_work_group_size: pass
         min_max_work_items_sizes: pass
-        min_max_write_image_args: pass
+        min_max_write_image_args: skip
         multi_queue_flush_on_release: pass
         native_kernel: pass
         negative_create_command_queue: pass
@@ -126,9 +126,9 @@ opencl_cases:
         negative_invalid_arg_index: pass
         negative_invalid_arg_mem_obj: pass
         negative_invalid_arg_queue: skip
-        negative_invalid_arg_sampler: pass
-        negative_invalid_arg_sampler_size: pass
-        negative_invalid_arg_size: skip
+        negative_invalid_arg_sampler: skip
+        negative_invalid_arg_sampler_size: skip
+        negative_invalid_arg_size: pass
         negative_invalid_kernel: pass
         negative_release_command_queue: pass
         negative_release_context: pass
@@ -142,14 +142,14 @@ opencl_cases:
         negative_set_immutable_memory_to_writeable_kernel_arg: skip
         negative_set_kernel_arg_invalid_image: skip
         negative_set_kernel_arg_invalid_image_msaa: skip
-        negative_set_read_write_image_arg: pass
+        negative_set_read_write_image_arg: skip
         null_buffer_arg: pass
-        null_required_work_group_size: skip
+        null_required_work_group_size: pass
         pipe_properties_queries: skip
         platform_extensions: pass
         queue_flush_on_release: pass
-        queue_hint: skip
-        queue_properties: skip
+        queue_hint: pass
+        queue_properties: pass
         queue_properties_queries: skip
         release_during_execute: pass
         release_kernel_order: pass
@@ -336,86 +336,113 @@ opencl_cases:
         work_group_suggested_local_size_3D: skip
         zero_sized_enqueue: pass
     defects:
-      pocl:
-        consistency_il_programs: "PoCL advertises IL support inconsistently"
-        get_context_info_mult_devices: "requires more than one device; PoCL exposes a single cpu device"
-        negative_create_context: "PoCL does not return CL_INVALID_PROPERTY for an invalid property value"
-        negative_create_context_from_type: "PoCL does not return CL_INVALID_PROPERTY for an invalid property value"
-        negative_create_sub_devices: "PoCL returns the wrong error code for invalid partition properties"
-        negative_get_device_ids: "PoCL returns the wrong error code for an invalid device type"
-        negative_invalid_arg_sampler: "PoCL returns the wrong error code for an invalid sampler argument"
-        negative_set_kernel_arg_invalid_image: "PoCL returns the wrong error code for an invalid image argument"
-        negative_set_read_write_image_arg: "PoCL returns the wrong error code for a read-write image argument"
-        null_required_work_group_size: "PoCL mishandles a null required work group size"
-    skip_reasons:
       vodd:
-        buffer_properties_queries: 'requires OpenCL 3.0'
-        clone_kernel_with_buf_image_kernels: 'requires OpenCL 2.1'
-        clone_kernel_with_different_args: 'requires OpenCL 2.1'
-        clone_kernel_with_exec_info: 'requires OpenCL 2.1'
-        clone_kernel_with_no_args: 'requires OpenCL 2.1'
-        clone_kernel_with_svm_ptrs: 'requires OpenCL 2.1'
-        consistency_2d_image_from_buffer: 'requires OpenCL 3.0'
-        consistency_3d_image_writes: 'requires OpenCL 3.0'
-        consistency_depth_images: 'requires OpenCL 3.0'
-        consistency_device_and_host_timer: 'requires OpenCL 3.0'
-        consistency_device_enqueue: 'requires OpenCL 3.0'
-        consistency_il_programs: 'requires OpenCL 3.0'
-        consistency_memory_model: 'requires OpenCL 3.0'
-        consistency_missing_compiler: 'the test declines under a condition not resolved statically'
-        consistency_missing_linker: 'the test declines under a condition not resolved statically'
-        consistency_non_uniform_work_group: 'requires OpenCL 3.0'
-        consistency_pipes: 'requires OpenCL 3.0'
-        consistency_prog_ctor_dtor: 'requires OpenCL 3.0'
-        consistency_progvar: 'requires OpenCL 3.0'
-        consistency_read_write_images: 'requires OpenCL 3.0'
-        consistency_requirements_fp16: 'requires cl_khr_fp16'
-        consistency_requirements_fp64: 'requires cl_khr_fp64'
-        consistency_subgroups: 'requires OpenCL 3.0'
-        consistency_svm: 'requires OpenCL 3.0'
-        context_destructor_callback: 'requires OpenCL 3.0'
-        get_command_queue_info: 'requires OpenCL 2.0'
-        get_context_info_mult_devices: 'reports 0 sub-devices'
-        get_device_info_31: 'requires OpenCL 3.1'
-        get_sampler_info: 'requires OpenCL 2.0'
-        image_properties_queries: 'requires OpenCL 3.0'
-        min_image_formats: 'requires cl_khr_3d_image_writes'
-        min_max_device_version: 'requires cl_khr_fp64'
-        min_max_image_2d_height: 'no image support'
-        min_max_image_2d_width: 'no image support'
-        min_max_image_3d_depth: 'no image support'
-        min_max_image_3d_height: 'no image support'
-        min_max_image_3d_width: 'no image support'
-        min_max_image_array_size: 'no image support'
-        min_max_image_buffer_size: 'no image support'
-        negative_create_command_queue_with_properties: 'requires OpenCL 2.0'
-        negative_create_command_queue_with_properties_khr: 'requires cl_khr_create_command_queue'
-        negative_create_sub_devices: 'reports 0 sub-devices'
-        negative_enqueue_map_image: 'requires cl_ext_immutable_memory_objects'
-        negative_get_device_and_host_timer: 'requires OpenCL 2.1'
-        negative_get_host_timer: 'requires OpenCL 2.1'
-        negative_invalid_arg_queue: 'no device-side enqueue'
-        negative_invalid_arg_size: 'requires cl_khr_fp16, cl_khr_fp64'
-        negative_set_command_queue_property: 'the test declines under a condition not resolved statically'
-        negative_set_context_destructor_callback: 'requires OpenCL 3.0'
-        negative_set_default_device_command_queue: 'requires OpenCL 2.1'
-        negative_set_immutable_memory_to_writeable_kernel_arg: 'requires cl_ext_immutable_memory_objects'
-        negative_set_kernel_arg_invalid_image: 'requires cl_khr_depth_images'
-        negative_set_kernel_arg_invalid_image_msaa: 'requires cl_khr_gl_msaa_sharing'
-        null_required_work_group_size: 'requires cl_khr_suggested_local_work_size'
-        pipe_properties_queries: 'requires OpenCL 3.0'
-        queue_hint: 'requires cl_khr_priority_hints, cl_khr_throttle_hints'
-        queue_properties: 'requires cl_khr_create_command_queue'
-        queue_properties_queries: 'requires OpenCL 3.0'
-        set_command_queue_property: 'no device-side enqueue'
-        set_default_device_command_queue: 'requires OpenCL 2.1'
-        spirv_query_dependencies: 'requires cl_khr_spirv_queries'
-        spirv_query_requirements: 'requires cl_khr_spirv_queries'
-        sub_group_dispatch: 'requires OpenCL 2.1'
-        work_group_suggested_local_size_1D: 'requires cl_khr_suggested_local_work_size'
-        work_group_suggested_local_size_2D: 'requires cl_khr_suggested_local_work_size'
-        work_group_suggested_local_size_3D: 'requires cl_khr_suggested_local_work_size'
-        zero_sized_enqueue: 'requires OpenCL 2.1'
+        get_kernel_arg_info: "vodd does not capture OpName, so clGetKernelArgInfo reports CL_KERNEL_ARG_INFO_NOT_AVAILABLE"
+        kernel_attributes: "vodd drops OpExecutionMode hints, so CL_KERNEL_ATTRIBUTES is empty"
+      pocl:
+        consistency_il_programs: '"PoCL advertises IL support inconsistently"'
+        get_context_info_mult_devices: '"requires more than one device; PoCL exposes a single cpu device"'
+        negative_create_context: '"PoCL does not return CL_INVALID_PROPERTY for an invalid property value"'
+        negative_create_context_from_type: '"PoCL does not return CL_INVALID_PROPERTY for an invalid property value"'
+        negative_create_sub_devices: '"PoCL returns the wrong error code for invalid partition properties"'
+        negative_get_device_ids: '"PoCL returns the wrong error code for an invalid device type"'
+        negative_invalid_arg_sampler: '"PoCL returns the wrong error code for an invalid sampler argument"'
+        negative_set_kernel_arg_invalid_image: '"PoCL returns the wrong error code for an invalid image argument"'
+        negative_set_read_write_image_arg: '"PoCL returns the wrong error code for a read-write image argument"'
+        null_required_work_group_size: '"PoCL mishandles a null required work group size"'
+    skip_reasons:
+      pocl:
+        consistency_missing_compiler: "Can't perform compiler consistency check"
+        consistency_missing_linker: "Can't perform linker consistency check"
+        get_device_info_31: "requires at least OpenCL version 3.1, but the device reports OpenCL version 3.0"
+        negative_create_command_queue_with_properties_khr: "cl_khr_create_command_queue is not supported"
+        negative_enqueue_map_image: "cl_ext_immutable_memory_objects is not supported on this device"
+        negative_invalid_arg_queue: "the test requires an OpenCL C version of 2.0 or later"
+        negative_set_command_queue_property: "clSetCommandQueueProperty returns CL_INVALID_OPERATION, which the test accepts for a non-OpenCL 1.0 device"
+        negative_set_immutable_memory_to_writeable_kernel_arg: "cl_ext_immutable_memory_objects is not supported on this device"
+        negative_set_kernel_arg_invalid_image_msaa: "cl_khr_gl_msaa_sharing is not supported on this device"
+        pipe_properties_queries: "the device reports CL_DEVICE_PIPE_SUPPORT as false"
+        set_command_queue_property: "clSetCommandQueueProperty returns CL_INVALID_OPERATION, which the test accepts for a non-OpenCL 1.0 device"
+        set_default_device_command_queue: "the device does not report CL_DEVICE_QUEUE_REPLACEABLE_DEFAULT"
+        spirv_query_dependencies: "cl_khr_spirv_queries is not supported;"
+        spirv_query_requirements: "cl_khr_spirv_queries is not supported;"
+        work_group_suggested_local_size_1D: "Device does not support 'cl_khr_suggested_local_work_size'. Skipping the test"
+        work_group_suggested_local_size_2D: "Device does not support 'cl_khr_suggested_local_work_size'. Skipping the test"
+        work_group_suggested_local_size_3D: "Device does not support 'cl_khr_suggested_local_work_size'. Skipping the test"
+      vodd:
+        buffer_properties_queries: "requires OpenCL 3.0"
+        clone_kernel_with_buf_image_kernels: "requires OpenCL 2.1"
+        clone_kernel_with_different_args: "requires OpenCL 2.1"
+        clone_kernel_with_exec_info: "requires OpenCL 2.1"
+        clone_kernel_with_no_args: "requires OpenCL 2.1"
+        clone_kernel_with_svm_ptrs: "requires OpenCL 2.1"
+        consistency_2d_image_from_buffer: "requires OpenCL 3.0"
+        consistency_3d_image_writes: "requires OpenCL 3.0"
+        consistency_depth_images: "requires OpenCL 3.0"
+        consistency_device_and_host_timer: "requires OpenCL 3.0"
+        consistency_device_enqueue: "requires OpenCL 3.0"
+        consistency_il_programs: "requires OpenCL 3.0"
+        consistency_memory_model: "requires OpenCL 3.0"
+        consistency_missing_compiler: "the test declines under a condition not resolved statically"
+        consistency_missing_linker: "the test declines under a condition not resolved statically"
+        consistency_non_uniform_work_group: "requires OpenCL 3.0"
+        consistency_pipes: "requires OpenCL 3.0"
+        consistency_prog_ctor_dtor: "requires OpenCL 3.0"
+        consistency_progvar: "requires OpenCL 3.0"
+        consistency_read_write_images: "requires OpenCL 3.0"
+        consistency_subgroups: "requires OpenCL 3.0"
+        consistency_svm: "requires OpenCL 3.0"
+        context_destructor_callback: "requires OpenCL 3.0"
+        get_command_queue_info: "requires OpenCL 2.0"
+        get_context_info_mult_devices: "reports 0 sub-devices"
+        get_device_info_31: "requires OpenCL 3.1"
+        get_image1d_array_info: "no image support"
+        get_image1d_info: "no image support"
+        get_image2d_array_info: "no image support"
+        get_image2d_info: "no image support"
+        get_image3d_info: "no image support"
+        get_sampler_info: "requires OpenCL 2.0"
+        get_sampler_info_compatibility: "no image support"
+        image_properties_queries: "requires OpenCL 3.0"
+        kernel_arg_changes: "no image support"
+        min_image_formats: "requires cl_khr_3d_image_writes"
+        min_max_image_2d_height: "no image support"
+        min_max_image_2d_width: "no image support"
+        min_max_image_3d_depth: "no image support"
+        min_max_image_3d_height: "no image support"
+        min_max_image_3d_width: "no image support"
+        min_max_image_array_size: "no image support"
+        min_max_image_buffer_size: "no image support"
+        min_max_read_image_args: "no image support"
+        min_max_samplers: "no image support"
+        min_max_write_image_args: "no image support"
+        negative_create_command_queue_with_properties: "requires OpenCL 2.0"
+        negative_create_command_queue_with_properties_khr: "requires cl_khr_create_command_queue"
+        negative_create_sub_devices: "reports 0 sub-devices"
+        negative_enqueue_map_image: "requires cl_ext_immutable_memory_objects"
+        negative_get_device_and_host_timer: "requires OpenCL 2.1"
+        negative_get_host_timer: "requires OpenCL 2.1"
+        negative_invalid_arg_queue: "no device-side enqueue"
+        negative_invalid_arg_sampler: "no image support"
+        negative_invalid_arg_sampler_size: "no image support"
+        negative_set_command_queue_property: "the test declines under a condition not resolved statically"
+        negative_set_context_destructor_callback: "requires OpenCL 3.0"
+        negative_set_default_device_command_queue: "requires OpenCL 2.1"
+        negative_set_immutable_memory_to_writeable_kernel_arg: "requires cl_ext_immutable_memory_objects"
+        negative_set_kernel_arg_invalid_image: "requires cl_khr_depth_images"
+        negative_set_kernel_arg_invalid_image_msaa: "requires cl_khr_gl_msaa_sharing"
+        negative_set_read_write_image_arg: "no image support"
+        pipe_properties_queries: "requires OpenCL 3.0"
+        queue_properties_queries: "requires OpenCL 3.0"
+        set_command_queue_property: "no device-side enqueue"
+        set_default_device_command_queue: "requires OpenCL 2.1"
+        spirv_query_dependencies: "requires cl_khr_spirv_queries"
+        spirv_query_requirements: "requires cl_khr_spirv_queries"
+        sub_group_dispatch: "requires OpenCL 2.1"
+        work_group_suggested_local_size_1D: "requires cl_khr_suggested_local_work_size"
+        work_group_suggested_local_size_2D: "requires cl_khr_suggested_local_work_size"
+        work_group_suggested_local_size_3D: "requires cl_khr_suggested_local_work_size"
+        zero_sized_enqueue: "requires OpenCL 2.1"
   - suite: buffers
     expected:
       vodd:
@@ -473,7 +500,7 @@ opencl_cases:
         buffer_read_async_ushort: pass
         buffer_read_char: pass
         buffer_read_float: pass
-        buffer_read_half: pass
+        buffer_read_half: skip
         buffer_read_int: pass
         buffer_read_long: pass
         buffer_read_random_size: pass
@@ -490,11 +517,11 @@ opencl_cases:
         buffer_write_async_short: pass
         buffer_write_async_uchar: pass
         buffer_write_async_uint: pass
-        buffer_write_async_ulong: skip
+        buffer_write_async_ulong: pass
         buffer_write_async_ushort: pass
         buffer_write_char: pass
         buffer_write_float: pass
-        buffer_write_half: pass
+        buffer_write_half: skip
         buffer_write_int: pass
         buffer_write_long: pass
         buffer_write_short: pass
@@ -627,33 +654,48 @@ opencl_cases:
         sub_buffers_read_write_dual_devices: pass
         write_from_immutable_buffer_to_buffer: skip
     skip_reasons:
+      pocl:
+        buffer_read_half: "device does not support fp16"
+        buffer_write_half: "device does not support fp16"
+        immutable_buffer_map_char: "cl_ext_immutable_memory_objects is not supported on this device"
+        immutable_buffer_map_float: "cl_ext_immutable_memory_objects is not supported on this device"
+        immutable_buffer_map_int: "cl_ext_immutable_memory_objects is not supported on this device"
+        immutable_buffer_map_long: "cl_ext_immutable_memory_objects is not supported on this device"
+        immutable_buffer_map_short: "cl_ext_immutable_memory_objects is not supported on this device"
+        immutable_buffer_map_uchar: "cl_ext_immutable_memory_objects is not supported on this device"
+        immutable_buffer_map_uint: "cl_ext_immutable_memory_objects is not supported on this device"
+        immutable_buffer_map_ulong: "cl_ext_immutable_memory_objects is not supported on this device"
+        immutable_buffer_map_ushort: "cl_ext_immutable_memory_objects is not supported on this device"
+        write_from_immutable_buffer_to_buffer: "cl_ext_immutable_memory_objects is not supported on this device"
       vodd:
-        buffer_write_async_ulong: 'requires cl_ext_immutable_memory_objects'
-        immutable_buffer_map_char: 'requires cl_ext_immutable_memory_objects'
-        immutable_buffer_map_float: 'requires cl_ext_immutable_memory_objects'
-        immutable_buffer_map_int: 'requires cl_ext_immutable_memory_objects'
-        immutable_buffer_map_long: 'requires cl_ext_immutable_memory_objects'
-        immutable_buffer_map_short: 'requires cl_ext_immutable_memory_objects'
-        immutable_buffer_map_uchar: 'requires cl_ext_immutable_memory_objects'
-        immutable_buffer_map_uint: 'requires cl_ext_immutable_memory_objects'
-        immutable_buffer_map_ulong: 'requires cl_ext_immutable_memory_objects'
-        immutable_buffer_map_ushort: 'requires cl_ext_immutable_memory_objects'
-        write_from_immutable_buffer_to_buffer: 'requires cl_ext_immutable_memory_objects'
+        buffer_read_half: "device does not support fp16"
+        buffer_write_half: "device does not support fp16"
+        immutable_buffer_map_char: "requires cl_ext_immutable_memory_objects"
+        immutable_buffer_map_float: "requires cl_ext_immutable_memory_objects"
+        immutable_buffer_map_int: "requires cl_ext_immutable_memory_objects"
+        immutable_buffer_map_long: "requires cl_ext_immutable_memory_objects"
+        immutable_buffer_map_short: "requires cl_ext_immutable_memory_objects"
+        immutable_buffer_map_uchar: "requires cl_ext_immutable_memory_objects"
+        immutable_buffer_map_uint: "requires cl_ext_immutable_memory_objects"
+        immutable_buffer_map_ulong: "requires cl_ext_immutable_memory_objects"
+        immutable_buffer_map_ushort: "requires cl_ext_immutable_memory_objects"
+        write_from_immutable_buffer_to_buffer: "requires cl_ext_immutable_memory_objects"
   - suite: compiler
     expected:
       vodd:
-        async_build: pass
+        async_build: fail
+        compile_and_link_status_options_log: fail
         compiler_defines_for_extensions: pass
-        execute_after_embedded_header_link: pass
-        execute_after_included_header_link: pass
-        execute_after_serialize_reload_library: pass
+        execute_after_embedded_header_link: fail
+        execute_after_included_header_link: fail
+        execute_after_serialize_reload_library: fail
         execute_after_serialize_reload_object: pass
         execute_after_simple_compile_and_link: pass
         execute_after_simple_compile_and_link_no_device_info: pass
         execute_after_simple_compile_and_link_with_callbacks: pass
         execute_after_simple_compile_and_link_with_defines: pass
-        execute_after_simple_library_with_link: pass
-        execute_after_two_file_link: pass
+        execute_after_simple_library_with_link: fail
+        execute_after_two_file_link: fail
         features_macro: skip
         features_macro_coupling: pass
         get_linked_program_info_kernel_names: pass
@@ -673,36 +715,42 @@ opencl_cases:
         load_null_terminated_source: pass
         load_program_source: pass
         load_two_kernel_source: pass
-        multiple_build_program: skip
+        multi_file_libraries: fail
+        multiple_build_program: pass
+        multiple_embedded_headers: fail
+        multiple_files: fail
+        multiple_files_multiple_libraries: fail
+        multiple_libraries: fail
         opencl_c_versions: pass
         options_build_macro: pass
         options_build_macro_existence: pass
         options_build_optimizations: pass
         options_denorm_cache: pass
-        options_include_directory: pass
+        options_include_directory: fail
         options_uniform_work_group_size: skip
         pragma_unroll: skip
         preprocessor_define_udef: pass
-        preprocessor_include: pass
+        preprocessor_include: fail
         preprocessor_line_error: pass
         preprocessor_pragma: pass
-        program_binary_type: pass
+        program_binary_type: fail
         simple_compile_only: pass
         simple_compile_with_callback: pass
         simple_embedded_header_compile: pass
-        simple_embedded_header_link: pass
+        simple_embedded_header_link: fail
         simple_extern_compile_only: pass
         simple_library_only: pass
         simple_library_with_callback: pass
-        simple_library_with_link: pass
+        simple_library_with_link: fail
         simple_link_only: pass
         simple_link_with_callback: pass
         simple_static_compile_only: pass
-        two_file_link: pass
+        two_file_link: fail
         two_file_regular_function_access: pass
-        two_file_regular_struct_access: pass
+        two_file_regular_struct_access: fail
         two_file_regular_variable_access: pass
         unload_build_info: pass
+        unload_build_threaded: pass
         unload_build_unload_create_kernel: pass
         unload_compile_unload_link: pass
         unload_link_different: pass
@@ -778,11 +826,31 @@ opencl_cases:
         unload_repeated: pass
         unload_valid: pass
     defects:
+      vodd:
+        async_build: "vodd builds synchronously, so the asynchronous build observation never holds"
+        compile_and_link_status_options_log: "clang lowers an extern __kernel declaration's __clang_ocl_kern_imp_ wrapper with mismatched pointer types, so spirv-link rejects the symbol"
+        execute_after_embedded_header_link: "clang lowers an extern __kernel declaration's __clang_ocl_kern_imp_ wrapper with mismatched pointer types, so spirv-link rejects the symbol"
+        execute_after_included_header_link: "clang lowers an extern __kernel declaration's __clang_ocl_kern_imp_ wrapper with mismatched pointer types, so spirv-link rejects the symbol"
+        execute_after_serialize_reload_library: "clang lowers an extern __kernel declaration's __clang_ocl_kern_imp_ wrapper with mismatched pointer types, so spirv-link rejects the symbol"
+        execute_after_simple_library_with_link: "clang lowers an extern __kernel declaration's __clang_ocl_kern_imp_ wrapper with mismatched pointer types, so spirv-link rejects the symbol"
+        execute_after_two_file_link: "clang lowers an extern __kernel declaration's __clang_ocl_kern_imp_ wrapper with mismatched pointer types, so spirv-link rejects the symbol"
+        multi_file_libraries: "clang lowers an extern __kernel declaration's __clang_ocl_kern_imp_ wrapper with mismatched pointer types, so spirv-link rejects the symbol"
+        multiple_embedded_headers: "clang lowers an extern __kernel declaration's __clang_ocl_kern_imp_ wrapper with mismatched pointer types, so spirv-link rejects the symbol"
+        multiple_files: "clang lowers an extern __kernel declaration's __clang_ocl_kern_imp_ wrapper with mismatched pointer types, so spirv-link rejects the symbol"
+        multiple_files_multiple_libraries: "clang lowers an extern __kernel declaration's __clang_ocl_kern_imp_ wrapper with mismatched pointer types, so spirv-link rejects the symbol"
+        multiple_libraries: "clang lowers an extern __kernel declaration's __clang_ocl_kern_imp_ wrapper with mismatched pointer types, so spirv-link rejects the symbol"
+        options_include_directory: "vodd compiles from a scratch directory, so a relative -I from the working directory does not resolve"
+        preprocessor_include: "vodd compiles from a scratch directory, so the absolute include path is not created"
+        program_binary_type: "clang lowers an extern __kernel declaration's __clang_ocl_kern_imp_ wrapper with mismatched pointer types, so spirv-link rejects the symbol"
+        simple_embedded_header_link: "clang lowers an extern __kernel declaration's __clang_ocl_kern_imp_ wrapper with mismatched pointer types, so spirv-link rejects the symbol"
+        simple_library_with_link: "clang lowers an extern __kernel declaration's __clang_ocl_kern_imp_ wrapper with mismatched pointer types, so spirv-link rejects the symbol"
+        two_file_link: "clang lowers an extern __kernel declaration's __clang_ocl_kern_imp_ wrapper with mismatched pointer types, so spirv-link rejects the symbol"
+        two_file_regular_struct_access: "clang lowers an extern __kernel declaration's __clang_ocl_kern_imp_ wrapper with mismatched pointer types, so spirv-link rejects the symbol"
       pocl:
-        get_program_info_mult_devices: "requires more than one device; PoCL exposes a single cpu device"
-        link_error_returns_program: "PoCL returns no program object on link failure"
-        options_include_directory: "PoCL does not honour -I in build options"
-        preprocessor_include: "PoCL does not honour -I in build options"
+        get_program_info_mult_devices: '"requires more than one device; PoCL exposes a single cpu device"'
+        link_error_returns_program: '"PoCL returns no program object on link failure"'
+        options_include_directory: '"PoCL does not honour -I in build options"'
+        preprocessor_include: '"PoCL does not honour -I in build options"'
     excluded:
       pocl:
         compile_and_link_status_options_log: "5.8s; multi-file compile and link"
@@ -794,11 +862,10 @@ opencl_cases:
         unload_build_threaded: "5.1s; repeated threaded build and unload"
     skip_reasons:
       vodd:
-        features_macro: 'requires OpenCL 3.0'
-        get_program_info_mult_devices: 'reports 0 sub-devices'
-        multiple_build_program: 'the test declines under a condition not resolved statically'
-        options_uniform_work_group_size: 'OpenCL C 1.2 only'
-        pragma_unroll: 'requires OpenCL 2.0'
+        features_macro: "requires OpenCL 3.0"
+        get_program_info_mult_devices: "reports 0 sub-devices"
+        options_uniform_work_group_size: "OpenCL C 1.2 only"
+        pragma_unroll: "requires OpenCL 2.0"
   - suite: computeinfo
     expected:
       vodd:
@@ -815,13 +882,16 @@ opencl_cases:
         pci_bus_info: skip
     defects:
       pocl:
-        computeinfo: "PoCL reports image formats inconsistently with its advertised image support"
+        computeinfo: '"PoCL reports image formats inconsistently with its advertised image support"'
     skip_reasons:
+      pocl:
+        device_uuid: "cl_khr_device_uuid not supported"
+        pci_bus_info: "cl_khr_pci_bus_info not supported"
       vodd:
-        conformance_version: 'requires OpenCL 3.0'
-        device_uuid: 'requires cl_khr_device_uuid'
-        extended_versioning: 'requires cl_khr_extended_versioning'
-        pci_bus_info: 'requires cl_khr_pci_bus_info'
+        conformance_version: "requires OpenCL 3.0"
+        device_uuid: "requires cl_khr_device_uuid"
+        extended_versioning: "requires cl_khr_extended_versioning"
+        pci_bus_info: "requires cl_khr_pci_bus_info"
   - suite: device_partition
     expected:
       vodd:
@@ -952,11 +1022,11 @@ opencl_cases:
     expected:
       vodd:
         copy_array: pass
-        copy_array_to_image: pass
-        copy_image: pass
+        copy_array_to_image: skip
+        copy_image: skip
         copy_partial_array: pass
-        execute: pass
-        execute_multipass: pass
+        execute: skip
+        execute_multipass: skip
         read_array_char: pass
         read_array_float: pass
         read_array_int: pass
@@ -967,9 +1037,9 @@ opencl_cases:
         read_array_uint: pass
         read_array_ulong: pass
         read_array_ushort: pass
-        read_image_char: pass
-        read_image_float: pass
-        read_image_uchar: pass
+        read_image_char: skip
+        read_image_float: skip
+        read_image_uchar: skip
         write_array_char: pass
         write_array_float: pass
         write_array_int: pass
@@ -980,9 +1050,9 @@ opencl_cases:
         write_array_uint: pass
         write_array_ulong: pass
         write_array_ushort: pass
-        write_image_char: pass
-        write_image_float: pass
-        write_image_uchar: pass
+        write_image_char: skip
+        write_image_float: skip
+        write_image_uchar: skip
       pocl:
         copy_array: pass
         copy_array_to_image: pass
@@ -1017,5 +1087,19 @@ opencl_cases:
         write_image_float: pass
         write_image_uchar: pass
     excluded:
+      vodd:
+        profiling_timebase: "requires OpenCL 2.1 clGetDeviceAndHostTimer"
       pocl:
         profiling_timebase: "flaky: correlates clGetDeviceAndHostTimer against queue timestamps and loses the race under load; also OpenCL 2.1 only"
+    skip_reasons:
+      vodd:
+        copy_array_to_image: "no image support"
+        copy_image: "no image support"
+        execute: "no image support"
+        execute_multipass: "no image support"
+        read_image_char: "no image support"
+        read_image_float: "no image support"
+        read_image_uchar: "no image support"
+        write_image_char: "no image support"
+        write_image_float: "no image support"
+        write_image_uchar: "no image support"

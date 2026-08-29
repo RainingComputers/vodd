@@ -9,6 +9,12 @@ const HEADERS: &str = "tests/OpenCL-Headers";
 const SPIRV_HEADERS: &str = "tests/SPIRV-Headers/include";
 const REDIRECT: &str = "tests/opencl/include";
 const BUILD: &str = "target/opencl";
+const DRIVER: &str = if cfg!(debug_assertions) {
+    "target/debug"
+} else {
+    "target/release"
+};
+const VODD: &str = "vodd";
 const TIMEOUT: u64 = 300;
 const HARNESS_SOURCES: &[&str] = &[
     "harness/alloc.cpp",
@@ -70,7 +76,7 @@ fn opencl_cases() {
                 .is_none_or(|wanted| &opencl_case.suite == wanted)
         })
         .map(|opencl_case| {
-            match run_opencl_case(opencl_case, &harness)
+            match run_opencl_case(opencl_case, &harness, &target)
                 .and_then(|produced| compare(opencl_case, &produced))
             {
                 Ok(()) => OpenclCaseResult::Passed,
@@ -104,8 +110,12 @@ fn opencl_cases() {
     );
 }
 
-fn run_opencl_case(opencl_case: &OpenclCase, harness: &[PathBuf]) -> Result<StringMap, String> {
-    let binary = build_suite(&opencl_case.suite, harness)?;
+fn run_opencl_case(
+    opencl_case: &OpenclCase,
+    harness: &[PathBuf],
+    target: &str,
+) -> Result<StringMap, String> {
+    let binary = build_suite(&opencl_case.suite, harness, target)?;
 
     let undeclared: Vec<String> = list_tests(&binary)?
         .into_iter()
@@ -121,7 +131,7 @@ fn run_opencl_case(opencl_case: &OpenclCase, harness: &[PathBuf]) -> Result<Stri
         ));
     }
 
-    let directory = Path::new(BUILD).join(&opencl_case.suite);
+    let directory = Path::new(BUILD).join(target).join(&opencl_case.suite);
     let produced = directory.join("results.json");
     let log = directory.join("run.log");
     let sink = std::fs::File::create(&log)
@@ -132,7 +142,7 @@ fn run_opencl_case(opencl_case: &OpenclCase, harness: &[PathBuf]) -> Result<Stri
     let mut command = Command::new(&binary);
     command
         .env("CL_CONFORMANCE_RESULTS_FILENAME", &produced)
-        .envs(runtime_environment())
+        .envs(runtime_environment(target))
         .args(opencl_case.expected.keys())
         .stdout(Stdio::from(sink.try_clone().map_err(|error| {
             format!("duplicating the log handle: {error}")
@@ -190,9 +200,9 @@ fn run_with_timeout(command: &mut Command, seconds: u64) -> Result<(), String> {
     }
 }
 
-fn build_suite(suite: &str, harness: &[PathBuf]) -> Result<PathBuf, String> {
+fn build_suite(suite: &str, harness: &[PathBuf], target: &str) -> Result<PathBuf, String> {
     let source_directory = Path::new(CTS).join("test_conformance").join(suite);
-    let directory = Path::new(BUILD).join(suite);
+    let directory = Path::new(BUILD).join(target).join(suite);
     std::fs::create_dir_all(&directory)
         .map_err(|error| format!("creating {}: {error}", directory.display()))?;
 
@@ -213,7 +223,7 @@ fn build_suite(suite: &str, harness: &[PathBuf]) -> Result<PathBuf, String> {
         .arg(&directory)
         .args(&sources)
         .args(harness)
-        .args(link_arguments())
+        .args(link_arguments(target)?)
         .arg("-o")
         .arg(&binary)
         .output()
@@ -339,14 +349,43 @@ fn compile_arguments() -> Vec<String> {
     .collect()
 }
 
-fn link_arguments() -> Vec<String> {
-    let loader = std::env::var("VODD_OPENCL_LOADER")
-        .unwrap_or_else(|_| "/opt/homebrew/opt/opencl-icd-loader".to_string());
+fn link_arguments(target: &str) -> Result<Vec<String>, String> {
+    if target != VODD {
+        let loader = std::env::var("VODD_OPENCL_LOADER")
+            .unwrap_or_else(|_| "/opt/homebrew/opt/opencl-icd-loader".to_string());
 
-    vec![format!("-L{loader}/lib"), "-lOpenCL".to_string()]
+        return Ok(vec![format!("-L{loader}/lib"), "-lOpenCL".to_string()]);
+    }
+
+    let library = Path::new(DRIVER).join("libvodd.dylib");
+    if !library.exists() {
+        return Err(format!(
+            "{} is missing; run: cargo build",
+            library.display()
+        ));
+    }
+
+    Ok(vec![
+        format!("-L{DRIVER}"),
+        "-lvodd".to_string(),
+        "-Wl,-undefined,dynamic_lookup".to_string(),
+    ])
 }
 
-fn runtime_environment() -> Vec<(String, String)> {
+fn runtime_environment(target: &str) -> Vec<(String, String)> {
+    let driver = (target == VODD).then(|| {
+        (
+            "DYLD_LIBRARY_PATH".to_string(),
+            std::fs::canonicalize(DRIVER)
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| DRIVER.to_string()),
+        )
+    });
+
+    driver.into_iter().chain(macos_sdk()).collect()
+}
+
+fn macos_sdk() -> Vec<(String, String)> {
     if !cfg!(target_os = "macos") {
         return Vec::new();
     }
@@ -364,6 +403,51 @@ fn runtime_environment() -> Vec<(String, String)> {
         ("SDKROOT".to_string(), sdk.clone()),
         ("LIBRARY_PATH".to_string(), format!("{sdk}/usr/lib")),
     ]
+}
+
+fn justify(context: &str, expected: &StringMap, defects: &StringMap, reasons: &StringMap) {
+    let undocumented = |status: &str, recorded: &StringMap| {
+        expected
+            .iter()
+            .filter(|(name, actual)| *actual == status && !recorded.contains_key(*name))
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<String>>()
+    };
+
+    let stale = |status: &str, recorded: &StringMap| {
+        recorded
+            .keys()
+            .filter(|name| expected.get(*name).is_none_or(|actual| actual != status))
+            .cloned()
+            .collect::<Vec<String>>()
+    };
+
+    let complaints = [
+        (
+            "fail without a defects entry",
+            undocumented("fail", defects),
+        ),
+        (
+            "skip without a skip_reasons entry",
+            undocumented("skip", reasons),
+        ),
+        (
+            "defects entry for a test that does not fail",
+            stale("fail", defects),
+        ),
+        (
+            "skip_reasons entry for a test that does not skip",
+            stale("skip", reasons),
+        ),
+    ];
+
+    let reported: Vec<String> = complaints
+        .iter()
+        .filter(|(_, names)| !names.is_empty())
+        .map(|(label, names)| format!("{label}: {}", names.join(", ")))
+        .collect();
+
+    assert!(reported.is_empty(), "{context}: {}", reported.join("; "));
 }
 
 fn load_opencl_cases(target: &str) -> Vec<OpenclCase> {
@@ -397,6 +481,23 @@ fn load_opencl_cases(target: &str) -> Vec<OpenclCase> {
             }
 
             let excluded = &entry["excluded"][target];
+
+            let optional = |key: &str| {
+                let value = &entry[key][target];
+
+                if value.is_badvalue() {
+                    StringMap::new()
+                } else {
+                    string_map(value, &format!("{context}: {key} for target {target}"))
+                }
+            };
+
+            justify(
+                &context,
+                &expected,
+                &optional("defects"),
+                &optional("skip_reasons"),
+            );
 
             OpenclCase {
                 expected,
