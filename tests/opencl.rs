@@ -4,18 +4,12 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
 
+const VODD: &str = "vodd";
+const TIMEOUT: u64 = 300;
 const CTS: &str = "tests/OpenCL-CTS";
 const HEADERS: &str = "tests/OpenCL-Headers";
 const SPIRV_HEADERS: &str = "tests/SPIRV-Headers/include";
 const REDIRECT: &str = "tests/opencl/include";
-const BUILD: &str = "target/opencl";
-const DRIVER: &str = if cfg!(debug_assertions) {
-    "target/debug"
-} else {
-    "target/release"
-};
-const VODD: &str = "vodd";
-const TIMEOUT: u64 = 300;
 const HARNESS_SOURCES: &[&str] = &[
     "harness/alloc.cpp",
     "harness/typeWrappers.cpp",
@@ -61,11 +55,14 @@ impl OpenclCaseResult {
 
 #[test]
 fn opencl_cases() {
-    let target = std::env::var("VODD_OPENCL_TARGET").unwrap_or_else(|_| "pocl".to_string());
+    let target = std::env::var("VODD_OPENCL_TARGET").unwrap_or_else(|_| VODD.to_string());
     let opencl_cases = load_opencl_cases(&target);
     assert!(!opencl_cases.is_empty(), "no OpenCL cases loaded");
 
-    let harness = build_harness().unwrap_or_else(|error| panic!("{error}"));
+    let driver = build_driver(&target).unwrap_or_else(|error| panic!("{error}"));
+    let artifacts = "target/opencl";
+
+    let harness = build_harness(artifacts).unwrap_or_else(|error| panic!("{error}"));
     let filter = std::env::var("VODD_OPENCL_CASE").ok();
 
     let results: Vec<OpenclCaseResult> = opencl_cases
@@ -76,7 +73,7 @@ fn opencl_cases() {
                 .is_none_or(|wanted| &opencl_case.suite == wanted)
         })
         .map(|opencl_case| {
-            match run_opencl_case(opencl_case, &harness, &target)
+            match run_opencl_case(opencl_case, &harness, &target, &driver, artifacts)
                 .and_then(|produced| compare(opencl_case, &produced))
             {
                 Ok(()) => OpenclCaseResult::Passed,
@@ -114,8 +111,10 @@ fn run_opencl_case(
     opencl_case: &OpenclCase,
     harness: &[PathBuf],
     target: &str,
+    driver: &str,
+    artifacts: &str,
 ) -> Result<StringMap, String> {
-    let binary = build_suite(&opencl_case.suite, harness, target)?;
+    let binary = build_suite(&opencl_case.suite, harness, target, driver, artifacts)?;
 
     let undeclared: Vec<String> = list_tests(&binary)?
         .into_iter()
@@ -131,7 +130,7 @@ fn run_opencl_case(
         ));
     }
 
-    let directory = Path::new(BUILD).join(target).join(&opencl_case.suite);
+    let directory = Path::new(artifacts).join(target).join(&opencl_case.suite);
     let produced = directory.join("results.json");
     let log = directory.join("run.log");
     let sink = std::fs::File::create(&log)
@@ -142,7 +141,7 @@ fn run_opencl_case(
     let mut command = Command::new(&binary);
     command
         .env("CL_CONFORMANCE_RESULTS_FILENAME", &produced)
-        .envs(runtime_environment(target))
+        .envs(runtime_environment(target, driver))
         .args(opencl_case.expected.keys())
         .stdout(Stdio::from(sink.try_clone().map_err(|error| {
             format!("duplicating the log handle: {error}")
@@ -200,9 +199,15 @@ fn run_with_timeout(command: &mut Command, seconds: u64) -> Result<(), String> {
     }
 }
 
-fn build_suite(suite: &str, harness: &[PathBuf], target: &str) -> Result<PathBuf, String> {
+fn build_suite(
+    suite: &str,
+    harness: &[PathBuf],
+    target: &str,
+    driver: &str,
+    artifacts: &str,
+) -> Result<PathBuf, String> {
     let source_directory = Path::new(CTS).join("test_conformance").join(suite);
-    let directory = Path::new(BUILD).join(target).join(suite);
+    let directory = Path::new(artifacts).join(target).join(suite);
     std::fs::create_dir_all(&directory)
         .map_err(|error| format!("creating {}: {error}", directory.display()))?;
 
@@ -223,7 +228,7 @@ fn build_suite(suite: &str, harness: &[PathBuf], target: &str) -> Result<PathBuf
         .arg(&directory)
         .args(&sources)
         .args(harness)
-        .args(link_arguments(target)?)
+        .args(link_arguments(target, driver)?)
         .arg("-o")
         .arg(&binary)
         .output()
@@ -244,14 +249,47 @@ fn build_suite(suite: &str, harness: &[PathBuf], target: &str) -> Result<PathBuf
     Ok(binary)
 }
 
-fn build_harness() -> Result<Vec<PathBuf>, String> {
+fn build_driver(target: &str) -> Result<String, String> {
+    let driver = "target/release".to_string();
+
+    if target != VODD {
+        return Ok(driver);
+    }
+
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let mut command = Command::new(cargo);
+
+    command.args(["build", "--release"]);
+
+    println!("driver [{target}]: building {driver}, which the suites link against");
+
+    let output = command
+        .output()
+        .map_err(|error| format!("building the vodd driver: {error}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "building the vodd driver: {}",
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .filter(|line| line.starts_with("error"))
+                .take(4)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+
+    Ok(driver)
+}
+
+fn build_harness(artifacts: &str) -> Result<Vec<PathBuf>, String> {
     if !Path::new(CTS).join("test_common").is_dir() {
         return Err(format!(
             "{CTS} is empty; run: git submodule update --init --recursive"
         ));
     }
 
-    let directory = Path::new(BUILD).join("harness");
+    let directory = Path::new(artifacts).join("harness");
     std::fs::create_dir_all(&directory)
         .map_err(|error| format!("creating {}: {error}", directory.display()))?;
 
@@ -349,7 +387,7 @@ fn compile_arguments() -> Vec<String> {
     .collect()
 }
 
-fn link_arguments(target: &str) -> Result<Vec<String>, String> {
+fn link_arguments(target: &str, driver: &str) -> Result<Vec<String>, String> {
     if target != VODD {
         let loader = std::env::var("VODD_OPENCL_LOADER")
             .unwrap_or_else(|_| "/opt/homebrew/opt/opencl-icd-loader".to_string());
@@ -357,7 +395,7 @@ fn link_arguments(target: &str) -> Result<Vec<String>, String> {
         return Ok(vec![format!("-L{loader}/lib"), "-lOpenCL".to_string()]);
     }
 
-    let library = Path::new(DRIVER).join("libvodd.dylib");
+    let library = Path::new(driver).join("libvodd.dylib");
     if !library.exists() {
         return Err(format!(
             "{} is missing; run: cargo build",
@@ -366,23 +404,23 @@ fn link_arguments(target: &str) -> Result<Vec<String>, String> {
     }
 
     Ok(vec![
-        format!("-L{DRIVER}"),
+        format!("-L{driver}"),
         "-lvodd".to_string(),
         "-Wl,-undefined,dynamic_lookup".to_string(),
     ])
 }
 
-fn runtime_environment(target: &str) -> Vec<(String, String)> {
-    let driver = (target == VODD).then(|| {
+fn runtime_environment(target: &str, driver: &str) -> Vec<(String, String)> {
+    let library_path = (target == VODD).then(|| {
         (
             "DYLD_LIBRARY_PATH".to_string(),
-            std::fs::canonicalize(DRIVER)
+            std::fs::canonicalize(driver)
                 .map(|path| path.display().to_string())
-                .unwrap_or_else(|_| DRIVER.to_string()),
+                .unwrap_or_else(|_| driver.to_string()),
         )
     });
 
-    driver.into_iter().chain(macos_sdk()).collect()
+    library_path.into_iter().chain(macos_sdk()).collect()
 }
 
 fn macos_sdk() -> Vec<(String, String)> {
@@ -403,6 +441,72 @@ fn macos_sdk() -> Vec<(String, String)> {
         ("SDKROOT".to_string(), sdk.clone()),
         ("LIBRARY_PATH".to_string(), format!("{sdk}/usr/lib")),
     ]
+}
+
+fn load_opencl_cases(target: &str) -> Vec<OpenclCase> {
+    let path = "tests/opencl.yaml";
+    let text = std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{path}: {error}"));
+    let documents = yaml_rust2::YamlLoader::load_from_str(&text)
+        .unwrap_or_else(|error| panic!("{path} is not valid YAML: {error}"));
+    let root = &documents[0];
+
+    root["opencl_cases"]
+        .as_vec()
+        .unwrap_or_else(|| panic!("{path} has no top level opencl_cases list"))
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let suite = entry["suite"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{path}: OpenCL case {index} has no suite name"))
+                .to_string();
+            let context = format!("OpenCL suite {suite}");
+
+            let expected = string_map(
+                &entry["expected"][target],
+                &format!("{context}: expected for target {target}"),
+            );
+
+            for (name, status) in &expected {
+                assert!(
+                    ["pass", "fail", "skip"].contains(&status.as_str()),
+                    "{context}: {name} has unknown status {status}"
+                );
+            }
+
+            let excluded = &entry["excluded"][target];
+
+            let optional = |key: &str| {
+                let value = &entry[key][target];
+
+                if value.is_badvalue() {
+                    StringMap::new()
+                } else {
+                    string_map(value, &format!("{context}: {key} for target {target}"))
+                }
+            };
+
+            justify(
+                &context,
+                &expected,
+                &optional("defects"),
+                &optional("skip_reasons"),
+            );
+
+            OpenclCase {
+                expected,
+                excluded: if excluded.is_badvalue() {
+                    StringMap::new()
+                } else {
+                    string_map(
+                        excluded,
+                        &format!("{context}: excluded for target {target}"),
+                    )
+                },
+                suite,
+            }
+        })
+        .collect()
 }
 
 fn justify(context: &str, expected: &StringMap, defects: &StringMap, reasons: &StringMap) {
@@ -448,71 +552,6 @@ fn justify(context: &str, expected: &StringMap, defects: &StringMap, reasons: &S
         .collect();
 
     assert!(reported.is_empty(), "{context}: {}", reported.join("; "));
-}
-
-fn load_opencl_cases(target: &str) -> Vec<OpenclCase> {
-    let path = "tests/opencl.yaml";
-    let text = std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{path}: {error}"));
-    let documents = yaml_rust2::YamlLoader::load_from_str(&text)
-        .unwrap_or_else(|error| panic!("{path} is not valid YAML: {error}"));
-    let root = &documents[0];
-
-    root["opencl_cases"]
-        .as_vec()
-        .unwrap_or_else(|| panic!("{path} has no top level opencl_cases list"))
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            let suite = entry["suite"]
-                .as_str()
-                .unwrap_or_else(|| panic!("{path}: OpenCL case {index} has no suite name"))
-                .to_string();
-            let context = format!("OpenCL suite {suite}");
-
-            let expected = string_map(
-                &entry["expected"][target],
-                &format!("{context}: expected for target {target}"),
-            );
-
-            for (name, status) in &expected {
-                if !["pass", "fail", "skip"].contains(&status.as_str()) {
-                    panic!("{context}: {name} has unknown status {status}");
-                }
-            }
-
-            let excluded = &entry["excluded"][target];
-
-            let optional = |key: &str| {
-                let value = &entry[key][target];
-
-                if value.is_badvalue() {
-                    StringMap::new()
-                } else {
-                    string_map(value, &format!("{context}: {key} for target {target}"))
-                }
-            };
-
-            justify(
-                &context,
-                &expected,
-                &optional("defects"),
-                &optional("skip_reasons"),
-            );
-
-            OpenclCase {
-                expected,
-                excluded: if excluded.is_badvalue() {
-                    StringMap::new()
-                } else {
-                    string_map(
-                        excluded,
-                        &format!("{context}: excluded for target {target}"),
-                    )
-                },
-                suite,
-            }
-        })
-        .collect()
 }
 
 fn string_map(entry: &yaml_rust2::Yaml, context: &str) -> StringMap {

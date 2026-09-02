@@ -11,8 +11,8 @@ pub type cl_float = f32;
 pub type cl_double = f64;
 
 pub type cl_bitfield = cl_ulong;
-pub type cl_properties = cl_ulong;
 pub type cl_bool = cl_uint;
+pub type cl_properties = cl_ulong;
 
 pub type cl_addressing_mode = cl_uint;
 pub type cl_buffer_create_type = cl_uint;
@@ -21,20 +21,9 @@ pub type cl_channel_type = cl_uint;
 pub type cl_command_queue_info = cl_uint;
 pub type cl_command_type = cl_uint;
 pub type cl_context_info = cl_uint;
-pub type cl_context_callback = unsafe extern "C" fn(
-    errinfo: *const core::ffi::c_char,
-    private_info: *const core::ffi::c_void,
-    cb: usize,
-    user_data: *mut core::ffi::c_void,
-);
 pub type cl_device_info = cl_uint;
 pub type cl_device_local_mem_type = cl_uint;
 pub type cl_device_mem_cache_type = cl_uint;
-pub type cl_event_callback = unsafe extern "C" fn(
-    event: cl_event,
-    event_command_status: cl_int,
-    user_data: *mut core::ffi::c_void,
-);
 pub type cl_event_info = cl_uint;
 pub type cl_filter_mode = cl_uint;
 pub type cl_image_info = cl_uint;
@@ -43,8 +32,6 @@ pub type cl_kernel_arg_address_qualifier = cl_uint;
 pub type cl_kernel_arg_info = cl_uint;
 pub type cl_kernel_info = cl_uint;
 pub type cl_kernel_work_group_info = cl_uint;
-pub type cl_mem_destructor_callback =
-    unsafe extern "C" fn(memobj: cl_mem, user_data: *mut core::ffi::c_void);
 pub type cl_mem_info = cl_uint;
 pub type cl_mem_object_type = cl_uint;
 pub type cl_platform_info = cl_uint;
@@ -53,6 +40,7 @@ pub type cl_program_binary_type = cl_uint;
 pub type cl_program_build_info = cl_uint;
 pub type cl_program_info = cl_uint;
 pub type cl_sampler_info = cl_uint;
+
 pub type cl_build_status = cl_int;
 
 pub type cl_command_queue_properties = cl_bitfield;
@@ -121,6 +109,22 @@ pub struct _cl_sampler {
     _opaque: [u8; 0],
 }
 pub type cl_sampler = *mut _cl_sampler;
+
+pub type cl_context_callback = unsafe extern "C" fn(
+    errinfo: *const core::ffi::c_char,
+    private_info: *const core::ffi::c_void,
+    cb: usize,
+    user_data: *mut core::ffi::c_void,
+);
+
+pub type cl_event_callback = unsafe extern "C" fn(
+    event: cl_event,
+    event_command_status: cl_int,
+    user_data: *mut core::ffi::c_void,
+);
+
+pub type cl_mem_destructor_callback =
+    unsafe extern "C" fn(memobj: cl_mem, user_data: *mut core::ffi::c_void);
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]

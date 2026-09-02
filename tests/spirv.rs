@@ -6,6 +6,7 @@ use vodd::bitcode;
 use vodd::interpreter;
 use vodd::parser;
 
+const ASSEMBLER: &str = "spirv-as";
 const FUEL: usize = 1 << 24;
 
 type Buffers = Vec<(u64, Vec<u8>)>;
@@ -48,6 +49,8 @@ impl SpirvCaseResult {
 fn spirv_cases() {
     let spirv_cases = load_spirv_cases();
     assert!(!spirv_cases.is_empty(), "no SPIR-V cases loaded");
+
+    find_assembler().unwrap_or_else(|error| panic!("{error}"));
 
     let filter = std::env::var("VODD_SPIRV_CASE").ok();
 
@@ -476,14 +479,22 @@ fn ulp_distance(one: u32, other: u32) -> u64 {
     (order(one) - order(other)).unsigned_abs()
 }
 
+fn find_assembler() -> Result<(), String> {
+    Command::new(ASSEMBLER)
+        .arg("--version")
+        .output()
+        .map(|_| ())
+        .map_err(|error| format!("{ASSEMBLER} must be installed and on PATH: {error}"))
+}
+
 fn assemble(assembly: &str) -> Result<Vec<u8>, String> {
-    let mut child = Command::new("spirv-as")
+    let mut child = Command::new(ASSEMBLER)
         .args(["--target-env", "opencl1.2", "-", "-o", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .unwrap_or_else(|error| panic!("spirv-as must be installed and on PATH: {error}"));
+        .map_err(|error| format!("assemble: spawning {ASSEMBLER}: {error}"))?;
 
     let written = child
         .stdin

@@ -5,9 +5,10 @@ pub const CL_DEVICE_NOT_FOUND: sys::cl_int = -1;
 pub const CL_COMPILER_NOT_AVAILABLE: sys::cl_int = -3;
 pub const CL_MEM_OBJECT_ALLOCATION_FAILURE: sys::cl_int = -4;
 pub const CL_OUT_OF_RESOURCES: sys::cl_int = -5;
-pub const CL_PROFILING_INFO_NOT_AVAILABLE: sys::cl_int = -7;
 pub const CL_OUT_OF_HOST_MEMORY: sys::cl_int = -6;
+pub const CL_PROFILING_INFO_NOT_AVAILABLE: sys::cl_int = -7;
 pub const CL_MEM_COPY_OVERLAP: sys::cl_int = -8;
+pub const CL_IMAGE_FORMAT_NOT_SUPPORTED: sys::cl_int = -10;
 pub const CL_BUILD_PROGRAM_FAILURE: sys::cl_int = -11;
 pub const CL_MISALIGNED_SUB_BUFFER_OFFSET: sys::cl_int = -13;
 pub const CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST: sys::cl_int = -14;
@@ -22,9 +23,11 @@ pub const CL_INVALID_DEVICE: sys::cl_int = -33;
 pub const CL_INVALID_CONTEXT: sys::cl_int = -34;
 pub const CL_INVALID_QUEUE_PROPERTIES: sys::cl_int = -35;
 pub const CL_INVALID_COMMAND_QUEUE: sys::cl_int = -36;
-pub const CL_IMAGE_FORMAT_NOT_SUPPORTED: sys::cl_int = -10;
 pub const CL_INVALID_HOST_PTR: sys::cl_int = -37;
+pub const CL_INVALID_MEM_OBJECT: sys::cl_int = -38;
 pub const CL_INVALID_IMAGE_FORMAT_DESCRIPTOR: sys::cl_int = -39;
+pub const CL_INVALID_IMAGE_SIZE: sys::cl_int = -40;
+pub const CL_INVALID_SAMPLER: sys::cl_int = -41;
 pub const CL_INVALID_BINARY: sys::cl_int = -42;
 pub const CL_INVALID_BUILD_OPTIONS: sys::cl_int = -43;
 pub const CL_INVALID_PROGRAM: sys::cl_int = -44;
@@ -40,9 +43,6 @@ pub const CL_INVALID_WORK_DIMENSION: sys::cl_int = -53;
 pub const CL_INVALID_WORK_GROUP_SIZE: sys::cl_int = -54;
 pub const CL_INVALID_WORK_ITEM_SIZE: sys::cl_int = -55;
 pub const CL_INVALID_GLOBAL_OFFSET: sys::cl_int = -56;
-pub const CL_INVALID_IMAGE_SIZE: sys::cl_int = -40;
-pub const CL_INVALID_SAMPLER: sys::cl_int = -41;
-pub const CL_INVALID_MEM_OBJECT: sys::cl_int = -38;
 pub const CL_INVALID_EVENT_WAIT_LIST: sys::cl_int = -57;
 pub const CL_INVALID_EVENT: sys::cl_int = -58;
 pub const CL_INVALID_OPERATION: sys::cl_int = -59;
@@ -55,11 +55,11 @@ pub const CL_INVALID_LINKER_OPTIONS: sys::cl_int = -67;
 pub const CL_FALSE: sys::cl_bool = 0;
 pub const CL_TRUE: sys::cl_bool = 1;
 
-pub const CL_NONE: sys::cl_uint = 0x0;
-pub const CL_READ_ONLY_CACHE: sys::cl_device_mem_cache_type = 0x1;
-pub const CL_READ_WRITE_CACHE: sys::cl_device_mem_cache_type = 0x2;
-pub const CL_LOCAL: sys::cl_device_local_mem_type = 0x1;
-pub const CL_GLOBAL: sys::cl_device_local_mem_type = 0x2;
+pub const CL_PLATFORM_PROFILE: sys::cl_platform_info = 0x0900;
+pub const CL_PLATFORM_VERSION: sys::cl_platform_info = 0x0901;
+pub const CL_PLATFORM_NAME: sys::cl_platform_info = 0x0902;
+pub const CL_PLATFORM_VENDOR: sys::cl_platform_info = 0x0903;
+pub const CL_PLATFORM_EXTENSIONS: sys::cl_platform_info = 0x0904;
 
 pub const CL_DEVICE_TYPE_DEFAULT: sys::cl_device_type = 1 << 0;
 pub const CL_DEVICE_TYPE_CPU: sys::cl_device_type = 1 << 1;
@@ -67,25 +67,6 @@ pub const CL_DEVICE_TYPE_GPU: sys::cl_device_type = 1 << 2;
 pub const CL_DEVICE_TYPE_ACCELERATOR: sys::cl_device_type = 1 << 3;
 pub const CL_DEVICE_TYPE_CUSTOM: sys::cl_device_type = 1 << 4;
 pub const CL_DEVICE_TYPE_ALL: sys::cl_device_type = 0xFFFF_FFFF;
-
-pub const CL_CONTEXT_REFERENCE_COUNT: sys::cl_context_info = 0x1080;
-pub const CL_CONTEXT_DEVICES: sys::cl_context_info = 0x1081;
-pub const CL_CONTEXT_PROPERTIES: sys::cl_context_info = 0x1082;
-pub const CL_CONTEXT_NUM_DEVICES: sys::cl_context_info = 0x1083;
-
-pub const CL_CONTEXT_PLATFORM: sys::cl_context_properties = 0x1084;
-pub const CL_CONTEXT_INTEROP_USER_SYNC: sys::cl_context_properties = 0x1085;
-
-pub const CL_QUEUE_CONTEXT: sys::cl_command_queue_info = 0x1090;
-pub const CL_QUEUE_DEVICE: sys::cl_command_queue_info = 0x1091;
-pub const CL_QUEUE_REFERENCE_COUNT: sys::cl_command_queue_info = 0x1092;
-pub const CL_QUEUE_PROPERTIES: sys::cl_command_queue_info = 0x1093;
-
-pub const CL_PLATFORM_PROFILE: sys::cl_platform_info = 0x0900;
-pub const CL_PLATFORM_VERSION: sys::cl_platform_info = 0x0901;
-pub const CL_PLATFORM_NAME: sys::cl_platform_info = 0x0902;
-pub const CL_PLATFORM_VENDOR: sys::cl_platform_info = 0x0903;
-pub const CL_PLATFORM_EXTENSIONS: sys::cl_platform_info = 0x0904;
 
 pub const CL_DEVICE_TYPE: sys::cl_device_info = 0x1000;
 pub const CL_DEVICE_VENDOR_ID: sys::cl_device_info = 0x1001;
@@ -169,10 +150,29 @@ pub const CL_FP_ROUND_TO_INF: sys::cl_device_fp_config = 1 << 4;
 pub const CL_FP_FMA: sys::cl_device_fp_config = 1 << 5;
 pub const CL_FP_SOFT_FLOAT: sys::cl_device_fp_config = 1 << 6;
 
+pub const CL_NONE: sys::cl_uint = 0x0;
+pub const CL_READ_ONLY_CACHE: sys::cl_device_mem_cache_type = 0x1;
+pub const CL_READ_WRITE_CACHE: sys::cl_device_mem_cache_type = 0x2;
+pub const CL_LOCAL: sys::cl_device_local_mem_type = 0x1;
+pub const CL_GLOBAL: sys::cl_device_local_mem_type = 0x2;
+
 pub const CL_EXEC_KERNEL: sys::cl_device_exec_capabilities = 1 << 0;
 pub const CL_EXEC_NATIVE_KERNEL: sys::cl_device_exec_capabilities = 1 << 1;
 pub const CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE: sys::cl_command_queue_properties = 1 << 0;
 pub const CL_QUEUE_PROFILING_ENABLE: sys::cl_command_queue_properties = 1 << 1;
+
+pub const CL_CONTEXT_REFERENCE_COUNT: sys::cl_context_info = 0x1080;
+pub const CL_CONTEXT_DEVICES: sys::cl_context_info = 0x1081;
+pub const CL_CONTEXT_PROPERTIES: sys::cl_context_info = 0x1082;
+pub const CL_CONTEXT_NUM_DEVICES: sys::cl_context_info = 0x1083;
+
+pub const CL_CONTEXT_PLATFORM: sys::cl_context_properties = 0x1084;
+pub const CL_CONTEXT_INTEROP_USER_SYNC: sys::cl_context_properties = 0x1085;
+
+pub const CL_QUEUE_CONTEXT: sys::cl_command_queue_info = 0x1090;
+pub const CL_QUEUE_DEVICE: sys::cl_command_queue_info = 0x1091;
+pub const CL_QUEUE_REFERENCE_COUNT: sys::cl_command_queue_info = 0x1092;
+pub const CL_QUEUE_PROPERTIES: sys::cl_command_queue_info = 0x1093;
 
 pub const CL_MEM_READ_WRITE: sys::cl_mem_flags = 1 << 0;
 pub const CL_MEM_WRITE_ONLY: sys::cl_mem_flags = 1 << 1;
@@ -203,12 +203,54 @@ pub const CL_MAP_READ: sys::cl_map_flags = 1 << 0;
 pub const CL_MAP_WRITE: sys::cl_map_flags = 1 << 1;
 pub const CL_MAP_WRITE_INVALIDATE_REGION: sys::cl_map_flags = 1 << 2;
 
+pub const CL_PROGRAM_REFERENCE_COUNT: sys::cl_program_info = 0x1160;
+pub const CL_PROGRAM_CONTEXT: sys::cl_program_info = 0x1161;
+pub const CL_PROGRAM_NUM_DEVICES: sys::cl_program_info = 0x1162;
+pub const CL_PROGRAM_DEVICES: sys::cl_program_info = 0x1163;
+pub const CL_PROGRAM_SOURCE: sys::cl_program_info = 0x1164;
+pub const CL_PROGRAM_BINARY_SIZES: sys::cl_program_info = 0x1165;
+pub const CL_PROGRAM_BINARIES: sys::cl_program_info = 0x1166;
+pub const CL_PROGRAM_NUM_KERNELS: sys::cl_program_info = 0x1167;
+pub const CL_PROGRAM_KERNEL_NAMES: sys::cl_program_info = 0x1168;
+
+pub const CL_PROGRAM_BUILD_STATUS: sys::cl_program_build_info = 0x1181;
+pub const CL_PROGRAM_BUILD_OPTIONS: sys::cl_program_build_info = 0x1182;
+pub const CL_PROGRAM_BUILD_LOG: sys::cl_program_build_info = 0x1183;
+pub const CL_PROGRAM_BINARY_TYPE: sys::cl_program_build_info = 0x1184;
+
+pub const CL_PROGRAM_BINARY_TYPE_NONE: sys::cl_program_binary_type = 0x0;
+pub const CL_PROGRAM_BINARY_TYPE_COMPILED_OBJECT: sys::cl_program_binary_type = 0x1;
+pub const CL_PROGRAM_BINARY_TYPE_LIBRARY: sys::cl_program_binary_type = 0x2;
+pub const CL_PROGRAM_BINARY_TYPE_EXECUTABLE: sys::cl_program_binary_type = 0x4;
+
+pub const CL_BUILD_SUCCESS: sys::cl_build_status = 0;
+pub const CL_BUILD_NONE: sys::cl_build_status = -1;
+pub const CL_BUILD_ERROR: sys::cl_build_status = -2;
+pub const CL_BUILD_IN_PROGRESS: sys::cl_build_status = -3;
+
+pub const CL_KERNEL_FUNCTION_NAME: sys::cl_kernel_info = 0x1190;
+pub const CL_KERNEL_NUM_ARGS: sys::cl_kernel_info = 0x1191;
+pub const CL_KERNEL_REFERENCE_COUNT: sys::cl_kernel_info = 0x1192;
+pub const CL_KERNEL_CONTEXT: sys::cl_kernel_info = 0x1193;
+pub const CL_KERNEL_PROGRAM: sys::cl_kernel_info = 0x1194;
+pub const CL_KERNEL_ATTRIBUTES: sys::cl_kernel_info = 0x1195;
+
+pub const CL_KERNEL_WORK_GROUP_SIZE: sys::cl_kernel_work_group_info = 0x11B0;
+pub const CL_KERNEL_COMPILE_WORK_GROUP_SIZE: sys::cl_kernel_work_group_info = 0x11B1;
+pub const CL_KERNEL_LOCAL_MEM_SIZE: sys::cl_kernel_work_group_info = 0x11B2;
+pub const CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE: sys::cl_kernel_work_group_info = 0x11B3;
+pub const CL_KERNEL_PRIVATE_MEM_SIZE: sys::cl_kernel_work_group_info = 0x11B4;
+pub const CL_KERNEL_GLOBAL_WORK_SIZE: sys::cl_kernel_work_group_info = 0x11B5;
+
 pub const CL_EVENT_COMMAND_QUEUE: sys::cl_event_info = 0x11D0;
 pub const CL_EVENT_COMMAND_TYPE: sys::cl_event_info = 0x11D1;
 pub const CL_EVENT_REFERENCE_COUNT: sys::cl_event_info = 0x11D2;
 pub const CL_EVENT_COMMAND_EXECUTION_STATUS: sys::cl_event_info = 0x11D3;
 pub const CL_EVENT_CONTEXT: sys::cl_event_info = 0x11D4;
 
+pub const CL_COMMAND_NDRANGE_KERNEL: sys::cl_command_type = 0x11F0;
+pub const CL_COMMAND_TASK: sys::cl_command_type = 0x11F1;
+pub const CL_COMMAND_NATIVE_KERNEL: sys::cl_command_type = 0x11F2;
 pub const CL_COMMAND_READ_BUFFER: sys::cl_command_type = 0x11F3;
 pub const CL_COMMAND_WRITE_BUFFER: sys::cl_command_type = 0x11F4;
 pub const CL_COMMAND_COPY_BUFFER: sys::cl_command_type = 0x11F5;
@@ -229,49 +271,6 @@ pub const CL_SUBMITTED: sys::cl_int = 0x2;
 pub const CL_QUEUED: sys::cl_int = 0x3;
 
 pub const CL_BUFFER_CREATE_TYPE_REGION: sys::cl_buffer_create_type = 0x1220;
-
-pub const CL_PROGRAM_REFERENCE_COUNT: sys::cl_program_info = 0x1160;
-pub const CL_PROGRAM_CONTEXT: sys::cl_program_info = 0x1161;
-pub const CL_PROGRAM_NUM_DEVICES: sys::cl_program_info = 0x1162;
-pub const CL_PROGRAM_DEVICES: sys::cl_program_info = 0x1163;
-pub const CL_PROGRAM_SOURCE: sys::cl_program_info = 0x1164;
-pub const CL_PROGRAM_BINARY_SIZES: sys::cl_program_info = 0x1165;
-pub const CL_PROGRAM_BINARIES: sys::cl_program_info = 0x1166;
-pub const CL_PROGRAM_NUM_KERNELS: sys::cl_program_info = 0x1167;
-pub const CL_PROGRAM_KERNEL_NAMES: sys::cl_program_info = 0x1168;
-
-pub const CL_PROGRAM_BUILD_STATUS: sys::cl_program_build_info = 0x1181;
-pub const CL_PROGRAM_BUILD_OPTIONS: sys::cl_program_build_info = 0x1182;
-pub const CL_PROGRAM_BUILD_LOG: sys::cl_program_build_info = 0x1183;
-pub const CL_PROGRAM_BINARY_TYPE: sys::cl_program_build_info = 0x1184;
-
-pub const CL_BUILD_SUCCESS: sys::cl_build_status = 0;
-pub const CL_BUILD_NONE: sys::cl_build_status = -1;
-pub const CL_BUILD_ERROR: sys::cl_build_status = -2;
-pub const CL_BUILD_IN_PROGRESS: sys::cl_build_status = -3;
-
-pub const CL_PROGRAM_BINARY_TYPE_NONE: sys::cl_program_binary_type = 0x0;
-pub const CL_PROGRAM_BINARY_TYPE_COMPILED_OBJECT: sys::cl_program_binary_type = 0x1;
-pub const CL_PROGRAM_BINARY_TYPE_LIBRARY: sys::cl_program_binary_type = 0x2;
-pub const CL_PROGRAM_BINARY_TYPE_EXECUTABLE: sys::cl_program_binary_type = 0x4;
-
-pub const CL_KERNEL_FUNCTION_NAME: sys::cl_kernel_info = 0x1190;
-pub const CL_KERNEL_NUM_ARGS: sys::cl_kernel_info = 0x1191;
-pub const CL_KERNEL_REFERENCE_COUNT: sys::cl_kernel_info = 0x1192;
-pub const CL_KERNEL_CONTEXT: sys::cl_kernel_info = 0x1193;
-pub const CL_KERNEL_PROGRAM: sys::cl_kernel_info = 0x1194;
-pub const CL_KERNEL_ATTRIBUTES: sys::cl_kernel_info = 0x1195;
-
-pub const CL_KERNEL_WORK_GROUP_SIZE: sys::cl_kernel_work_group_info = 0x11B0;
-pub const CL_KERNEL_COMPILE_WORK_GROUP_SIZE: sys::cl_kernel_work_group_info = 0x11B1;
-pub const CL_KERNEL_LOCAL_MEM_SIZE: sys::cl_kernel_work_group_info = 0x11B2;
-pub const CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE: sys::cl_kernel_work_group_info = 0x11B3;
-pub const CL_KERNEL_PRIVATE_MEM_SIZE: sys::cl_kernel_work_group_info = 0x11B4;
-pub const CL_KERNEL_GLOBAL_WORK_SIZE: sys::cl_kernel_work_group_info = 0x11B5;
-
-pub const CL_COMMAND_NDRANGE_KERNEL: sys::cl_command_type = 0x11F0;
-pub const CL_COMMAND_TASK: sys::cl_command_type = 0x11F1;
-pub const CL_COMMAND_NATIVE_KERNEL: sys::cl_command_type = 0x11F2;
 
 pub const CL_PROFILING_COMMAND_QUEUED: sys::cl_profiling_info = 0x1280;
 pub const CL_PROFILING_COMMAND_SUBMIT: sys::cl_profiling_info = 0x1281;
