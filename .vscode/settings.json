@@ -13,6 +13,7 @@
         "errcode",
         "errinfo",
         "Fabs",
+        "finclude",
         "Fmax",
         "Fmin",
         "memobj",
@@ -33,6 +34,7 @@
         "VODD",
         "waitlist",
         "waitlists",
-        "Workgroups"
+        "Workgroups",
+        "Xclang"
     ]
 }

@@ -15,7 +15,7 @@ use std::thread::JoinHandle;
 const BINARY_MAGIC: &[u8] = b"VODD";
 const EXTENSIONS: &str = "cl_khr_byte_addressable_store cl_khr_global_int32_base_atomics cl_khr_global_int32_extended_atomics cl_khr_local_int32_base_atomics cl_khr_local_int32_extended_atomics cles_khr_int64";
 const MAX_WORK_GROUP_SIZE: usize = 256;
-const MAX_WORK_ITEM_SIZE: u64 = 256; // TODO: what does this mean?
+const MAX_WORK_ITEM_SIZE: u64 = 256;
 const LOCAL_MEM_SIZE: u64 = 32 * 1024;
 const GLOBAL_MEM_SIZE: u64 = 64 * 1024 * 1024;
 const MAX_MEM_ALLOC_SIZE: u64 = GLOBAL_MEM_SIZE / 4;
@@ -60,7 +60,6 @@ fn signal_progress() {
 }
 
 fn await_progress(generation: u64) {
-    // TODO: how does this work
     let progress = PROGRESS.lock().expect("progress");
     let _settled = PROGRESSED
         .wait_while(progress, |current| *current == generation)
@@ -758,8 +757,6 @@ impl Context {
         devices: Vec<Device>,
         notify: Option<Notify>,
     ) -> Result<ContextId> {
-        // TODO: validate properties passed to create?
-
         if devices.is_empty() {
             return Err(Error::InvalidValue);
         }
@@ -931,7 +928,6 @@ impl Slab {
     }
 }
 
-// TODO: what about the map command?
 pub enum Command {
     Copy {
         source: Slab,
@@ -976,14 +972,10 @@ impl Command {
     }
 
     fn execute(&self) -> Result<()> {
-        if let Command::Ndrange { launch, grid } = self {
-            return launch.run(grid);
-        }
-
-        let mut buffers = BUFFERS.lock().expect("buffers");
-
         match self {
             Command::Copy { source, destination, region } => {
+                let mut buffers = BUFFERS.lock().expect("buffers");
+
                 let Some(from) = source.base(&mut buffers) else {
                     return Ok(());
                 };
@@ -994,6 +986,8 @@ impl Command {
                 copy_slabs(from, source, into, destination, region);
             }
             Command::Fill { destination, region, pattern } => {
+                let mut buffers = BUFFERS.lock().expect("buffers");
+
                 let Some(into) = destination.base(&mut buffers) else {
                     return Ok(());
                 };
@@ -1001,11 +995,14 @@ impl Command {
                 fill_slab(into, destination, region, pattern);
             }
             Command::Unmap { buffer, mapped } => {
+                let mut buffers = BUFFERS.lock().expect("buffers");
+
                 if let Some(buffer) = buffers.get_mut(buffer) {
                     buffer.unmap(*mapped);
                 }
             }
-            Command::Ndrange { .. } | Command::Nothing => {}
+            Command::Ndrange { launch, grid } => launch.run(grid)?,
+            Command::Nothing => {}
         }
 
         Ok(())
@@ -1171,9 +1168,6 @@ impl CommandQueue {
     }
 
     pub fn flush(id: QueueId) -> Result<()> {
-        // TODO: don't we have to implement this? why are we not implementing this?
-        // TODO: should this call finish?
-
         QUEUES
             .lock()
             .expect("queues")
@@ -1638,40 +1632,6 @@ impl Program {
         Ok(id)
     }
 
-    fn wrap_binary(binary: &[u8], binary_type: BinaryType) -> Vec<u8> {
-        let tag: u32 = match binary_type {
-            BinaryType::None => 0,
-            BinaryType::CompiledObject => 1,
-            BinaryType::Library => 2,
-            BinaryType::Executable => 4,
-        };
-
-        BINARY_MAGIC
-            .iter()
-            .copied()
-            .chain(tag.to_le_bytes())
-            .chain(binary.iter().copied())
-            .collect()
-    }
-
-    fn unwrap_binary(binary: &[u8]) -> Result<(BinaryType, Vec<u8>)> {
-        let Some(tagged) = binary.strip_prefix(BINARY_MAGIC) else {
-            return Ok((BinaryType::Executable, binary.to_vec()));
-        };
-
-        let (tag, module) = tagged.split_at_checked(4).ok_or(Error::InvalidBinary)?;
-        let tag = u32::from_le_bytes(tag.try_into().map_err(|_| Error::InvalidBinary)?);
-
-        let binary_type = match tag {
-            1 => BinaryType::CompiledObject,
-            2 => BinaryType::Library,
-            4 => BinaryType::Executable,
-            _ => return Err(Error::InvalidBinary),
-        };
-
-        Ok((binary_type, module.to_vec()))
-    }
-
     pub fn retain(id: ProgramId) -> Result<()> {
         PROGRAMS
             .lock()
@@ -1815,7 +1775,7 @@ impl Program {
             BinaryType::Executable
         };
 
-        let linked = compiler::link(&objects, library);
+        let linked = compiler::link(&objects, library).map_err(linking);
 
         if let Err(error) = Self::adopt(id, options, binary_type, linked) {
             if let Some(notify) = notify {
@@ -1927,7 +1887,7 @@ impl Program {
         id: ProgramId,
         options: String,
         binary_type: BinaryType,
-        produced: Result<compiler::Output>,
+        produced: core::result::Result<compiler::Output, Failed>,
     ) -> Result<()> {
         let mut programs = PROGRAMS.lock().expect("programs");
         let program = programs.get_mut(&id).ok_or(Error::InvalidProgram)?;
@@ -1936,9 +1896,9 @@ impl Program {
 
         let output = match produced {
             Ok(output) => output,
-            Err(error) => {
+            Err((error, reason)) => {
                 program.status = BuildStatus::Error;
-                program.log = format!("{error:?}\n");
+                program.log = format!("{reason}\n");
 
                 return Err(error);
             }
@@ -2052,8 +2012,7 @@ impl Program {
         headers: &[(String, String)],
         options: &str,
     ) -> core::result::Result<Option<Translated>, Failed> {
-        let output = compiler::compile(source, headers, options)
-            .map_err(|error| (error, "no SPIR-V capable clang was found\n".to_string()))?;
+        let output = compiler::compile(source, headers, options).map_err(compiling)?;
 
         match output.binary {
             Some(binary) => Ok(Some((binary, output.log))),
@@ -2086,6 +2045,40 @@ impl Program {
             .unwrap_or_default()
     }
 
+    fn wrap_binary(binary: &[u8], binary_type: BinaryType) -> Vec<u8> {
+        let tag: u32 = match binary_type {
+            BinaryType::None => 0,
+            BinaryType::CompiledObject => 1,
+            BinaryType::Library => 2,
+            BinaryType::Executable => 4,
+        };
+
+        BINARY_MAGIC
+            .iter()
+            .copied()
+            .chain(tag.to_le_bytes())
+            .chain(binary.iter().copied())
+            .collect()
+    }
+
+    fn unwrap_binary(binary: &[u8]) -> Result<(BinaryType, Vec<u8>)> {
+        let Some(tagged) = binary.strip_prefix(BINARY_MAGIC) else {
+            return Ok((BinaryType::Executable, binary.to_vec()));
+        };
+
+        let (tag, module) = tagged.split_at_checked(4).ok_or(Error::InvalidBinary)?;
+        let tag = u32::from_le_bytes(tag.try_into().map_err(|_| Error::InvalidBinary)?);
+
+        let binary_type = match tag {
+            1 => BinaryType::CompiledObject,
+            2 => BinaryType::Library,
+            4 => BinaryType::Executable,
+            _ => return Err(Error::InvalidBinary),
+        };
+
+        Ok((binary_type, module.to_vec()))
+    }
+
     fn entries(&self) -> Result<Vec<String>> {
         let module = self
             .module
@@ -2097,6 +2090,40 @@ impl Program {
             .iter()
             .map(|entry| entry.name.clone())
             .collect())
+    }
+}
+
+fn compiling(error: compiler::Error) -> Failed {
+    match error {
+        compiler::Error::Missing => (
+            Error::CompilerNotAvailable,
+            "no SPIR-V capable clang was found".to_string(),
+        ),
+        compiler::Error::Spawn => (
+            Error::BuildProgramFailure,
+            "the compiler could not be run".to_string(),
+        ),
+        compiler::Error::Staging => (
+            Error::BuildProgramFailure,
+            "the compiler input could not be written".to_string(),
+        ),
+    }
+}
+
+fn linking(error: compiler::Error) -> Failed {
+    match error {
+        compiler::Error::Missing => (
+            Error::LinkerNotAvailable,
+            "no spirv-link was found".to_string(),
+        ),
+        compiler::Error::Spawn => (
+            Error::LinkProgramFailure,
+            "the linker could not be run".to_string(),
+        ),
+        compiler::Error::Staging => (
+            Error::LinkProgramFailure,
+            "the linker input could not be written".to_string(),
+        ),
     }
 }
 
@@ -2142,8 +2169,8 @@ pub struct Kernel {
     module: Arc<bitcode::Module>,
     function: bitcode::Id,
     signature: Vec<ArgumentKind>,
-    required_local_size: Option<[u32; 3]>,
-    static_local: usize,
+    required_work_group_size: Option<[u32; 3]>,
+    static_local_size: usize,
     arguments: Vec<Option<KernelArgument>>,
 }
 
@@ -2221,7 +2248,7 @@ fn divide(global: [u64; 3], dimensions: u32) -> [u64; 3] {
 
 impl Kernel {
     pub fn create(program: ProgramId, name: String) -> Result<KernelId> {
-        let (module, function, required_local_size) = Program::entry(program, &name)?;
+        let (module, function, required_work_group_size) = Program::entry(program, &name)?;
         let signature = Self::signature(&module, function)?;
         let context = Program::context(program)?;
         let static_local =
@@ -2243,8 +2270,8 @@ impl Kernel {
                 module,
                 function,
                 signature,
-                required_local_size,
-                static_local,
+                required_work_group_size,
+                static_local_size: static_local,
                 arguments,
             },
         );
@@ -2316,7 +2343,7 @@ impl Kernel {
             KernelWorkGroupInfo::WorkGroupSize => InfoValue::Size(MAX_WORK_GROUP_SIZE),
             KernelWorkGroupInfo::CompileWorkGroupSize => InfoValue::Sizes(
                 kernel
-                    .required_local_size
+                    .required_work_group_size
                     .unwrap_or([0, 0, 0])
                     .iter()
                     .map(|size| *size as usize)
@@ -2411,7 +2438,7 @@ impl Kernel {
                 _ => None,
             })
             .sum::<usize>()
-            + self.static_local
+            + self.static_local_size
     }
 
     fn snapshot(id: KernelId) -> Result<(Launch, Option<[u32; 3]>, ContextId)> {
@@ -2425,7 +2452,7 @@ impl Kernel {
             .collect::<Option<Vec<KernelArgument>>>()
             .ok_or(Error::InvalidKernelArgs)?;
 
-        let mut arena = align_up(kernel.static_local);
+        let mut arena = align_up(kernel.static_local_size);
         let local_offsets = arguments
             .iter()
             .map(|argument| match argument {
@@ -2447,7 +2474,7 @@ impl Kernel {
                 local_offsets,
                 arena,
             },
-            kernel.required_local_size,
+            kernel.required_work_group_size,
             kernel.context,
         ))
     }
@@ -2545,7 +2572,6 @@ impl Launch {
                         None => break,
                         Some(interpreter::YieldReason::ControlBarrier { .. }) => {
                             parked[lane] = true;
-
                             break;
                         }
                         Some(reason) => {
@@ -2581,92 +2607,6 @@ fn trap(error: interpreter::Error) -> Error {
         | interpreter::Error::UnsupportedRegion => Error::OutOfResources,
         _ => Error::InvalidProgramExecutable,
     }
-}
-
-fn builtin(kind: bitcode::Builtin, geometry: &Grid, group: [u64; 3], lane: usize) -> [u64; 3] {
-    let local = [
-        lane as u64 % geometry.local[0],
-        (lane as u64 / geometry.local[0]) % geometry.local[1],
-        lane as u64 / (geometry.local[0] * geometry.local[1]),
-    ];
-
-    match kind {
-        bitcode::Builtin::LocalInvocationId => local,
-        bitcode::Builtin::WorkgroupId => group,
-        bitcode::Builtin::NumWorkgroups => geometry.work_group_count(),
-        bitcode::Builtin::WorkgroupSize => geometry.local,
-        bitcode::Builtin::GlobalOffset => geometry.offset,
-        bitcode::Builtin::GlobalInvocationId => [
-            geometry.offset[0] + group[0] * geometry.local[0] + local[0],
-            geometry.offset[1] + group[1] * geometry.local[1] + local[1],
-            geometry.offset[2] + group[2] * geometry.local[2] + local[2],
-        ],
-    }
-}
-
-fn within(bounds: &[Bound], address: u64, size: usize) -> Result<()> {
-    bounds
-        .iter()
-        .any(|bound| address >= bound.base && address + size as u64 <= bound.base + bound.size)
-        .then_some(())
-        .ok_or(Error::OutOfResources)
-}
-
-fn signed(bits: u64, width: u32) -> i64 {
-    let shift = 64 - width.min(64);
-
-    ((bits << shift) as i64) >> shift
-}
-
-fn apply(
-    operation: interpreter::Atomic,
-    previous: u64,
-    value: u64,
-    comparator: u64,
-    width: u32,
-) -> u64 {
-    match operation {
-        interpreter::Atomic::Load => previous,
-        interpreter::Atomic::Store | interpreter::Atomic::Exchange => value,
-        interpreter::Atomic::CompareExchange => {
-            if previous == comparator {
-                value
-            } else {
-                previous
-            }
-        }
-        interpreter::Atomic::Increment => previous.wrapping_add(1),
-        interpreter::Atomic::Decrement => previous.wrapping_sub(1),
-        interpreter::Atomic::Add => previous.wrapping_add(value),
-        interpreter::Atomic::Sub => previous.wrapping_sub(value),
-        interpreter::Atomic::UnsignedMin => previous.min(value),
-        interpreter::Atomic::UnsignedMax => previous.max(value),
-        interpreter::Atomic::SignedMin => {
-            if signed(previous, width) <= signed(value, width) {
-                previous
-            } else {
-                value
-            }
-        }
-        interpreter::Atomic::SignedMax => {
-            if signed(previous, width) >= signed(value, width) {
-                previous
-            } else {
-                value
-            }
-        }
-        interpreter::Atomic::And => previous & value,
-        interpreter::Atomic::Or => previous | value,
-        interpreter::Atomic::Xor => previous ^ value,
-    }
-}
-
-fn local_slice(arena: &mut [u8], address: u64, size: usize) -> Result<&mut [u8]> {
-    let start = address as usize;
-
-    arena
-        .get_mut(start..start + size)
-        .ok_or(Error::OutOfResources)
 }
 
 fn service(
@@ -2745,6 +2685,92 @@ fn service(
         interpreter::YieldReason::MemoryBarrier { .. }
         | interpreter::YieldReason::ControlBarrier { .. } => interpreter::Resume::Ack,
     })
+}
+
+fn builtin(kind: bitcode::Builtin, geometry: &Grid, group: [u64; 3], lane: usize) -> [u64; 3] {
+    let local = [
+        lane as u64 % geometry.local[0],
+        (lane as u64 / geometry.local[0]) % geometry.local[1],
+        lane as u64 / (geometry.local[0] * geometry.local[1]),
+    ];
+
+    match kind {
+        bitcode::Builtin::LocalInvocationId => local,
+        bitcode::Builtin::WorkgroupId => group,
+        bitcode::Builtin::NumWorkgroups => geometry.work_group_count(),
+        bitcode::Builtin::WorkgroupSize => geometry.local,
+        bitcode::Builtin::GlobalOffset => geometry.offset,
+        bitcode::Builtin::GlobalInvocationId => [
+            geometry.offset[0] + group[0] * geometry.local[0] + local[0],
+            geometry.offset[1] + group[1] * geometry.local[1] + local[1],
+            geometry.offset[2] + group[2] * geometry.local[2] + local[2],
+        ],
+    }
+}
+
+fn within(bounds: &[Bound], address: u64, size: usize) -> Result<()> {
+    bounds
+        .iter()
+        .any(|bound| address >= bound.base && address + size as u64 <= bound.base + bound.size)
+        .then_some(())
+        .ok_or(Error::OutOfResources)
+}
+
+fn apply(
+    operation: interpreter::Atomic,
+    previous: u64,
+    value: u64,
+    comparator: u64,
+    width: u32,
+) -> u64 {
+    match operation {
+        interpreter::Atomic::Load => previous,
+        interpreter::Atomic::Store | interpreter::Atomic::Exchange => value,
+        interpreter::Atomic::CompareExchange => {
+            if previous == comparator {
+                value
+            } else {
+                previous
+            }
+        }
+        interpreter::Atomic::Increment => previous.wrapping_add(1),
+        interpreter::Atomic::Decrement => previous.wrapping_sub(1),
+        interpreter::Atomic::Add => previous.wrapping_add(value),
+        interpreter::Atomic::Sub => previous.wrapping_sub(value),
+        interpreter::Atomic::UnsignedMin => previous.min(value),
+        interpreter::Atomic::UnsignedMax => previous.max(value),
+        interpreter::Atomic::SignedMin => {
+            if signed(previous, width) <= signed(value, width) {
+                previous
+            } else {
+                value
+            }
+        }
+        interpreter::Atomic::SignedMax => {
+            if signed(previous, width) >= signed(value, width) {
+                previous
+            } else {
+                value
+            }
+        }
+        interpreter::Atomic::And => previous & value,
+        interpreter::Atomic::Or => previous | value,
+        interpreter::Atomic::Xor => previous ^ value,
+    }
+}
+
+fn signed(bits: u64, width: u32) -> i64 {
+    let shift = 64 - width.min(64);
+
+    ((bits << shift) as i64) >> shift
+}
+
+fn local_slice(arena: &mut [u8], address: u64, size: usize) -> Result<&mut [u8]> {
+    let start = address as usize;
+
+    arena
+        .get_mut(start..start + size)
+        .ok_or(Error::OutOfResources)
 }
 
 pub struct Buffer {
@@ -3032,7 +3058,6 @@ impl Buffer {
     }
 
     fn host_pointer(&self) -> SharedMemoryPointer {
-        // TODO: both are the same here?
         match self.parent {
             Some(_) if !self.external.is_null() => self.external,
             _ => self.flags.host_pointer(),

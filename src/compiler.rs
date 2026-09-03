@@ -1,20 +1,20 @@
-use crate::platform;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 
-static CLANG: OnceLock<Option<PathBuf>> = OnceLock::new();
-static LINKER: OnceLock<Option<PathBuf>> = OnceLock::new();
-static NEXT_SCRATCH: AtomicU32 = AtomicU32::new(0);
-
 const LINKERS: &[&str] = &[
     "/opt/homebrew/bin/spirv-link",
     "/usr/local/bin/spirv-link",
     "spirv-link",
 ];
-
+const COMPILERS: &[&str] = &[
+    "/opt/homebrew/opt/llvm/bin/clang",
+    "/opt/homebrew/opt/llvm@21/bin/clang",
+    "/usr/local/opt/llvm/bin/clang",
+    "clang",
+];
 const SUPPLIED: &[&str] = &[
     "atomic_inc",
     "atomic_dec",
@@ -22,7 +22,6 @@ const SUPPLIED: &[&str] = &[
     "atomic_max",
     "atomic_xchg",
 ];
-
 const PRELUDE: &str = r#"#define VODD_OVERLOAD __attribute__((overloadable))
 #define VODD_RMW(name, type, space, expr) \
     VODD_OVERLOAD type name(volatile space type *p, type v) \
@@ -54,28 +53,26 @@ VODD_ATOMICS(local)
 #line 1
 "#;
 
-const CANDIDATES: &[&str] = &[
-    "/opt/homebrew/opt/llvm/bin/clang",
-    "/opt/homebrew/opt/llvm@21/bin/clang",
-    "/usr/local/opt/llvm/bin/clang",
-    "clang",
-];
+static CLANG: OnceLock<Option<PathBuf>> = OnceLock::new();
+static LINKER: OnceLock<Option<PathBuf>> = OnceLock::new();
+static NEXT_SCRATCH: AtomicU32 = AtomicU32::new(0);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Error {
+    Missing,
+    Spawn,
+    Staging,
+}
+
+pub type Result<T> = core::result::Result<T, Error>;
 
 pub struct Output {
     pub binary: Option<Vec<u8>>,
     pub log: String,
 }
 
-pub fn available() -> bool {
-    clang().is_some()
-}
-
-pub fn linkable() -> bool {
-    linker().is_some()
-}
-
-pub fn link(objects: &[Vec<u8>], library: bool) -> platform::Result<Output> {
-    let linker = linker().ok_or(platform::Error::LinkerNotAvailable)?;
+pub fn link(objects: &[Vec<u8>], library: bool) -> Result<Output> {
+    let linker = linker().ok_or(Error::Missing)?;
     let scratch = Scratch::new()?;
 
     let inputs = objects
@@ -86,9 +83,9 @@ pub fn link(objects: &[Vec<u8>], library: bool) -> platform::Result<Output> {
 
             std::fs::write(&path, object)
                 .map(|()| path)
-                .map_err(|_| platform::Error::LinkProgramFailure)
+                .map_err(|_| Error::Staging)
         })
-        .collect::<platform::Result<Vec<PathBuf>>>()?;
+        .collect::<Result<Vec<PathBuf>>>()?;
 
     let produced = scratch.path.join("linked.spv");
     let mut command = Command::new(linker);
@@ -98,9 +95,7 @@ pub fn link(objects: &[Vec<u8>], library: bool) -> platform::Result<Output> {
         command.arg("--create-library");
     }
 
-    let output = command
-        .output()
-        .map_err(|_| platform::Error::LinkerNotAvailable)?;
+    let output = command.output().map_err(|_| Error::Spawn)?;
 
     let log = String::from_utf8_lossy(&output.stderr).into_owned();
     let binary = output
@@ -112,22 +107,18 @@ pub fn link(objects: &[Vec<u8>], library: bool) -> platform::Result<Output> {
     Ok(Output { binary, log })
 }
 
-pub fn compile(
-    source: &str,
-    headers: &[(String, String)],
-    options: &str,
-) -> platform::Result<Output> {
-    let clang = clang().ok_or(platform::Error::CompilerNotAvailable)?;
+pub fn compile(source: &str, headers: &[(String, String)], options: &str) -> Result<Output> {
+    let clang = clang().ok_or(Error::Missing)?;
     let scratch = Scratch::new()?;
 
     headers.iter().try_for_each(|(name, text)| {
         let path = scratch.path.join(name);
 
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|_| platform::Error::CompileProgramFailure)?;
+            std::fs::create_dir_all(parent).map_err(|_| Error::Staging)?;
         }
 
-        std::fs::write(path, text).map_err(|_| platform::Error::CompileProgramFailure)
+        std::fs::write(path, text).map_err(|_| Error::Staging)
     })?;
 
     let input = scratch.path.join("source.cl");
@@ -137,7 +128,7 @@ pub fn compile(
         source.to_string()
     };
 
-    std::fs::write(&input, prepared).map_err(|_| platform::Error::CompileProgramFailure)?;
+    std::fs::write(&input, prepared).map_err(|_| Error::Staging)?;
 
     let produced = scratch.path.join("source.spv");
 
@@ -148,7 +139,7 @@ pub fn compile(
         .arg(&produced)
         .arg(&input)
         .output()
-        .map_err(|_| platform::Error::CompilerNotAvailable)?;
+        .map_err(|_| Error::Spawn)?;
 
     let log = String::from_utf8_lossy(&output.stderr).into_owned();
     let binary = output
@@ -181,11 +172,11 @@ struct Scratch {
 }
 
 impl Scratch {
-    fn new() -> platform::Result<Self> {
+    fn new() -> Result<Self> {
         let unique = NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("vodd-{}-{unique}", std::process::id()));
 
-        std::fs::create_dir_all(&path).map_err(|_| platform::Error::OutOfHostMemory)?;
+        std::fs::create_dir_all(&path).map_err(|_| Error::Staging)?;
 
         Ok(Self { path })
     }
@@ -195,6 +186,14 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         let _removed = std::fs::remove_dir_all(&self.path);
     }
+}
+
+pub fn available() -> bool {
+    clang().is_some()
+}
+
+pub fn linkable() -> bool {
+    linker().is_some()
 }
 
 fn linker() -> Option<&'static PathBuf> {
@@ -222,7 +221,7 @@ fn clang() -> Option<&'static PathBuf> {
                 .ok()
                 .map(PathBuf::from)
                 .into_iter()
-                .chain(CANDIDATES.iter().map(PathBuf::from))
+                .chain(COMPILERS.iter().map(PathBuf::from))
                 .find(targets_spirv)
         })
         .as_ref()
