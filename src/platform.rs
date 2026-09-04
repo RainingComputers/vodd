@@ -19,7 +19,7 @@ const MAX_WORK_ITEM_SIZE: u64 = 256;
 const LOCAL_MEM_SIZE: u64 = 32 * 1024;
 const GLOBAL_MEM_SIZE: u64 = 64 * 1024 * 1024;
 const MAX_MEM_ALLOC_SIZE: u64 = GLOBAL_MEM_SIZE / 4;
-const MEM_BASE_ADDR_ALIGN_BITS: u32 = 1024; // TODO: what does this mean?
+const MEM_BASE_ADDR_ALIGN_BITS: u32 = 1024;
 const FUEL: usize = 1 << 28;
 
 static NEXT_OBJECT_ID: AtomicU32 = AtomicU32::new(1);
@@ -66,12 +66,9 @@ fn await_progress(generation: u64) {
         .expect("progress");
 }
 
-// TODO: ensure all of these errors are used
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Error {
     DeviceNotFound,
-    MemObjectAllocationFailure,
-    OutOfHostMemory,
     MemCopyOverlap,
     MisalignedSubBufferOffset,
     ExecStatusErrorForEventsInWaitList,
@@ -98,9 +95,6 @@ pub enum Error {
     LinkProgramFailure,
     KernelArgInfoNotAvailable,
     InvalidBinary,
-    InvalidBuildOptions,
-    InvalidCompilerOptions,
-    InvalidLinkerOptions,
     InvalidProgram,
     InvalidProgramExecutable,
     InvalidKernelName,
@@ -116,9 +110,6 @@ pub enum Error {
     InvalidGlobalOffset,
     InvalidGlobalWorkSize,
     InvalidSampler,
-    InvalidImageSize,
-    InvalidImageFormatDescriptor,
-    ImageFormatNotSupported,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -162,7 +153,7 @@ object_id!(EventId);
 object_id!(ProgramId);
 object_id!(KernelId);
 
-pub type Notify = Arc<dyn Fn(&str) + Send + Sync>; // TODO: rename this to ContextNotify
+pub type ContextNotify = Arc<dyn Fn(&str) + Send + Sync>;
 pub type EventNotify = Box<dyn FnOnce(EventId, Status) + Send>;
 pub type DestructorNotify = Box<dyn FnOnce(BufferId) + Send>;
 pub type ProgramNotify = Box<dyn FnOnce(ProgramId) + Send>;
@@ -418,7 +409,6 @@ pub enum MemObjectType {
     Buffer,
 }
 
-// TODO: are all of these used?
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CommandType {
     ReadBuffer,
@@ -436,7 +426,6 @@ pub enum CommandType {
     User,
     NdrangeKernel,
     Task,
-    NativeKernel,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -659,7 +648,6 @@ impl Device {
     pub const MEM_BASE_ADDR_ALIGN: usize = MEM_BASE_ADDR_ALIGN_BITS as usize / 8;
 
     pub fn info(self, param: DeviceInfo) -> InfoValue {
-        // TODO: validate below
         match param {
             DeviceInfo::Type => InfoValue::DeviceType(Self::TYPE),
             DeviceInfo::VendorId => InfoValue::Uint(0),
@@ -748,14 +736,14 @@ pub struct Context {
     reference_count: u32,
     devices: Vec<Device>,
     properties: Option<Vec<ContextProperty>>,
-    notify: Option<Notify>,
+    notify: Option<ContextNotify>,
 }
 
 impl Context {
     pub fn create(
         properties: Option<Vec<ContextProperty>>,
         devices: Vec<Device>,
-        notify: Option<Notify>,
+        notify: Option<ContextNotify>,
     ) -> Result<ContextId> {
         if devices.is_empty() {
             return Err(Error::InvalidValue);
@@ -820,7 +808,6 @@ impl Context {
     }
 
     fn report(id: ContextId, message: &str) {
-        // TODO: why is this called report instead of notify?
         let notify = CONTEXTS
             .lock()
             .expect("contexts")
@@ -878,7 +865,6 @@ impl Slab {
     }
 
     fn base(&self, buffers: &mut BTreeMap<BufferId, Buffer>) -> Option<SharedMemoryPointer> {
-        // TODO: this should be a result type that errors out if the ID does not exist?
         match self.target {
             Target::Buffer(id) => Some(buffers.get_mut(&id)?.base()),
             Target::Host(host) => Some(host),
@@ -1195,7 +1181,6 @@ impl CommandQueue {
         }
     }
 
-    // TODO: should this be prefixed with enqueue_?
     pub fn read_buffer(
         id: QueueId,
         buffer: BufferId,
@@ -1216,7 +1201,6 @@ impl CommandQueue {
         )
     }
 
-    // TODO: should this be prefixed with enqueue_?
     pub fn write_buffer(
         id: QueueId,
         buffer: BufferId,
@@ -1237,7 +1221,6 @@ impl CommandQueue {
         )
     }
 
-    // TODO: should this be prefixed with enqueue_?
     pub fn copy_buffer(
         id: QueueId,
         source: BufferId,
@@ -1264,7 +1247,6 @@ impl CommandQueue {
         )
     }
 
-    // TODO: should this be called enqueue_transfer
     pub fn transfer(
         id: QueueId,
         source: Slab,
@@ -1302,7 +1284,6 @@ impl CommandQueue {
         )
     }
 
-    // TODO: should this be prefixed with enqueue_?
     pub fn fill_buffer(
         id: QueueId,
         buffer: BufferId,
@@ -1329,7 +1310,6 @@ impl CommandQueue {
         )
     }
 
-    // TODO: should this be prefixed with enqueue_?
     pub fn map_buffer(
         id: QueueId,
         buffer: BufferId,
@@ -1358,7 +1338,6 @@ impl CommandQueue {
         }
     }
 
-    // TODO: should this be prefixed with enqueue_?
     pub fn unmap(
         id: QueueId,
         buffer: BufferId,
@@ -1376,7 +1355,6 @@ impl CommandQueue {
         Self::enqueue(id, Command::Nothing, CommandType::UnmapMemObject, wait)
     }
 
-    // TODO: should this be prefixed with enqueue_?
     pub fn migrate(
         id: QueueId,
         buffers: &[BufferId],
@@ -1394,11 +1372,20 @@ impl CommandQueue {
         Self::enqueue(id, Command::Nothing, CommandType::MigrateMemObjects, wait)
     }
 
-    // TODO: should this be prefixed with enqueue_?
     pub fn ndrange(
         id: QueueId,
         kernel: KernelId,
         geometry: Geometry,
+        wait: Vec<EventId>,
+    ) -> Result<EventId> {
+        Self::launch(id, kernel, geometry, CommandType::NdrangeKernel, wait)
+    }
+
+    fn launch(
+        id: QueueId,
+        kernel: KernelId,
+        geometry: Geometry,
+        command_type: CommandType,
         wait: Vec<EventId>,
     ) -> Result<EventId> {
         let (launch, required, context) = Kernel::snapshot(kernel)?;
@@ -1417,12 +1404,7 @@ impl CommandQueue {
             return Err(Error::InvalidContext);
         }
 
-        Self::enqueue(
-            id,
-            Command::Ndrange { launch, grid },
-            CommandType::NdrangeKernel,
-            wait,
-        )
+        Self::enqueue(id, Command::Ndrange { launch, grid }, command_type, wait)
     }
 
     pub fn task(id: QueueId, kernel: KernelId, wait: Vec<EventId>) -> Result<EventId> {
@@ -1433,7 +1415,7 @@ impl CommandQueue {
             local: Some([1, 1, 1]),
         };
 
-        Self::ndrange(id, kernel, geometry, wait)
+        Self::launch(id, kernel, geometry, CommandType::Task, wait)
     }
 
     fn context(id: QueueId) -> Result<ContextId> {
@@ -1501,7 +1483,6 @@ impl CommandQueue {
         Self::enqueue(id, Command::Nothing, CommandType::Marker, wait)
     }
 
-    // TODO: should this be prefixed with enqueue_?
     pub fn barrier(id: QueueId, wait: Vec<EventId>) -> Result<EventId> {
         Self::enqueue(id, Command::Nothing, CommandType::Barrier, wait)
     }
@@ -1942,6 +1923,15 @@ impl Program {
         binary_type: BinaryType,
         included: Vec<(String, String)>,
     ) -> Result<()> {
+        fn failure(error: Error, binary_type: BinaryType) -> Error {
+            match (error, binary_type) {
+                (Error::BuildProgramFailure, BinaryType::CompiledObject) => {
+                    Error::CompileProgramFailure
+                }
+                _ => error,
+            }
+        }
+
         let source = {
             let mut programs = PROGRAMS.lock().expect("programs");
             let program = programs.get_mut(&id).ok_or(Error::InvalidProgram)?;
@@ -1979,7 +1969,7 @@ impl Program {
                 program.binary_type = BinaryType::None;
                 program.log = log;
 
-                return Err(error);
+                return Err(failure(error, binary_type));
             }
         }
 
@@ -2002,7 +1992,7 @@ impl Program {
                 program.binary_type = BinaryType::None;
                 program.log = format!("{error:?}\n");
 
-                Err(Error::BuildProgramFailure)
+                Err(failure(Error::BuildProgramFailure, binary_type))
             }
         }
     }
@@ -2012,7 +2002,7 @@ impl Program {
         headers: &[(String, String)],
         options: &str,
     ) -> core::result::Result<Option<Translated>, Failed> {
-        let output = compiler::compile(source, headers, options).map_err(compiling)?;
+        let output = compiler::compile(source, headers, options, None).map_err(compiling)?;
 
         match output.binary {
             Some(binary) => Ok(Some((binary, output.log))),
@@ -2177,6 +2167,7 @@ pub struct Kernel {
 pub struct Launch {
     module: Arc<bitcode::Module>,
     function: bitcode::Id,
+    context: ContextId,
     arguments: Vec<KernelArgument>,
     local_offsets: Vec<usize>,
     arena: usize,
@@ -2470,6 +2461,7 @@ impl Kernel {
             Launch {
                 module: Arc::clone(&kernel.module),
                 function: kernel.function,
+                context: kernel.context,
                 arguments,
                 local_offsets,
                 arena,
@@ -2568,14 +2560,24 @@ impl Launch {
                 progressed = true;
 
                 loop {
-                    match items[lane].resume(reply).map_err(trap)? {
+                    let outcome = match items[lane].resume(reply) {
+                        Ok(outcome) => outcome,
+                        Err(error) => return Err(self.trapped(items[lane].location(), error)),
+                    };
+
+                    match outcome {
                         None => break,
                         Some(interpreter::YieldReason::ControlBarrier { .. }) => {
                             parked[lane] = true;
                             break;
                         }
                         Some(reason) => {
-                            reply = service(reason, geometry, group, lane, bounds, arena)?;
+                            reply = match service(reason, geometry, group, lane, bounds, arena) {
+                                Ok(reply) => reply,
+                                Err(error) => {
+                                    return Err(self.faulted(items[lane].location(), error));
+                                }
+                            };
                         }
                     }
                 }
@@ -2595,6 +2597,40 @@ impl Launch {
                     replies[lane] = Some(interpreter::Resume::Ack);
                 }
             }
+        }
+    }
+
+    fn trapped(&self, location: Option<bitcode::Location>, error: interpreter::Error) -> Error {
+        let origin = self.located(location);
+
+        Context::report(
+            self.context,
+            &format!("{origin}: kernel trapped: {error:?}"),
+        );
+
+        trap(error)
+    }
+
+    fn faulted(&self, location: Option<bitcode::Location>, error: Error) -> Error {
+        let origin = self.located(location);
+
+        Context::report(
+            self.context,
+            &format!("{origin}: kernel faulted: {error:?}"),
+        );
+
+        error
+    }
+
+    fn located(&self, location: Option<bitcode::Location>) -> String {
+        match location {
+            Some(location) => format!(
+                "{}:{}:{}",
+                self.module.string(location.file).unwrap_or("<unknown>"),
+                location.line,
+                location.column
+            ),
+            None => "<unknown location>".to_string(),
         }
     }
 }
@@ -2778,7 +2814,7 @@ pub struct Buffer {
     context: ContextId,
     flags: MemFlags,
     size: usize,
-    external: SharedMemoryPointer, // TODO: this is just host_pointer?
+    external: SharedMemoryPointer,
     storage: Option<Vec<u8>>,
     parent: Option<BufferId>,
     origin: usize,
@@ -3321,7 +3357,6 @@ impl Event {
     }
 }
 
-// TODO: should this be called upsert_worker?
 fn update_worker() {
     let mut worker = WORKER.lock().expect("worker");
     let idle = QUEUES.lock().expect("queues").is_empty();
@@ -3336,7 +3371,6 @@ fn update_worker() {
             signal_progress();
             running.join().expect("worker");
         }
-        // TODO: is this branch even necessary? or can this branch just be ()?
         (_, existing) => *worker = existing,
     }
 }

@@ -33,9 +33,8 @@ impl Region {
         Ok(match storage {
             bitcode::StorageClass::CrossWorkgroup => Region::Global,
             bitcode::StorageClass::Workgroup => Region::Local,
-            bitcode::StorageClass::UniformConstant | bitcode::StorageClass::Private => {
-                Region::Module
-            }
+            bitcode::StorageClass::UniformConstant => Region::Global,
+            bitcode::StorageClass::Private => Region::Module,
             bitcode::StorageClass::Function => Region::Invocation,
             bitcode::StorageClass::Generic => Region::Generic,
             bitcode::StorageClass::Input => {

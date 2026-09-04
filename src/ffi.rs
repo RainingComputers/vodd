@@ -594,14 +594,13 @@ fn encode_command_type(command_type: platform::CommandType) -> sys::cl_command_t
         platform::CommandType::User => consts::CL_COMMAND_USER,
         platform::CommandType::NdrangeKernel => consts::CL_COMMAND_NDRANGE_KERNEL,
         platform::CommandType::Task => consts::CL_COMMAND_TASK,
-        platform::CommandType::NativeKernel => consts::CL_COMMAND_NATIVE_KERNEL,
     }
 }
 
 pub(crate) unsafe fn context_notify(
     pfn_notify: Option<sys::cl_context_callback>,
     user_data: *mut core::ffi::c_void,
-) -> platform::Result<Option<platform::Notify>> {
+) -> platform::Result<Option<platform::ContextNotify>> {
     match pfn_notify {
         None if user_data.is_null() => Ok(None),
         None => Err(platform::Error::InvalidValue),
@@ -905,8 +904,6 @@ pub(crate) fn kernel_work_group_info(
 pub(crate) fn code(error: platform::Error) -> sys::cl_int {
     match error {
         platform::Error::DeviceNotFound => consts::CL_DEVICE_NOT_FOUND,
-        platform::Error::MemObjectAllocationFailure => consts::CL_MEM_OBJECT_ALLOCATION_FAILURE,
-        platform::Error::OutOfHostMemory => consts::CL_OUT_OF_HOST_MEMORY,
         platform::Error::MemCopyOverlap => consts::CL_MEM_COPY_OVERLAP,
         platform::Error::MisalignedSubBufferOffset => consts::CL_MISALIGNED_SUB_BUFFER_OFFSET,
         platform::Error::ExecStatusErrorForEventsInWaitList => {
@@ -935,9 +932,6 @@ pub(crate) fn code(error: platform::Error) -> sys::cl_int {
         platform::Error::LinkProgramFailure => consts::CL_LINK_PROGRAM_FAILURE,
         platform::Error::KernelArgInfoNotAvailable => consts::CL_KERNEL_ARG_INFO_NOT_AVAILABLE,
         platform::Error::InvalidBinary => consts::CL_INVALID_BINARY,
-        platform::Error::InvalidBuildOptions => consts::CL_INVALID_BUILD_OPTIONS,
-        platform::Error::InvalidCompilerOptions => consts::CL_INVALID_COMPILER_OPTIONS,
-        platform::Error::InvalidLinkerOptions => consts::CL_INVALID_LINKER_OPTIONS,
         platform::Error::InvalidProgram => consts::CL_INVALID_PROGRAM,
         platform::Error::InvalidProgramExecutable => consts::CL_INVALID_PROGRAM_EXECUTABLE,
         platform::Error::InvalidKernelName => consts::CL_INVALID_KERNEL_NAME,
@@ -953,9 +947,6 @@ pub(crate) fn code(error: platform::Error) -> sys::cl_int {
         platform::Error::InvalidGlobalOffset => consts::CL_INVALID_GLOBAL_OFFSET,
         platform::Error::InvalidGlobalWorkSize => consts::CL_INVALID_GLOBAL_WORK_SIZE,
         platform::Error::InvalidSampler => consts::CL_INVALID_SAMPLER,
-        platform::Error::InvalidImageSize => consts::CL_INVALID_IMAGE_SIZE,
-        platform::Error::InvalidImageFormatDescriptor => consts::CL_INVALID_IMAGE_FORMAT_DESCRIPTOR,
-        platform::Error::ImageFormatNotSupported => consts::CL_IMAGE_FORMAT_NOT_SUPPORTED,
     }
 }
 

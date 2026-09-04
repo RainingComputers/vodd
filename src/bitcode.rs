@@ -9,6 +9,7 @@ pub enum Error {
     NotAType(Id),
     NotAFunction(Id),
     NotAConstant(Id),
+    NotAString(Id),
     UnsupportedType(Id),
     NotSpirv,
     UnalignedLength,
@@ -465,10 +466,33 @@ pub enum Instruction {
     Unreachable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Location {
+    pub file: Id,
+    pub line: u32,
+    pub column: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct Block {
     pub label: Id,
     pub instructions: Vec<Instruction>,
+    pub lines: Vec<Option<Location>>,
+}
+
+impl Block {
+    pub fn new(label: Id) -> Block {
+        Block { label, instructions: Vec::new(), lines: Vec::new() }
+    }
+
+    pub fn push(&mut self, instruction: Instruction, line: Option<Location>) {
+        self.instructions.push(instruction);
+        self.lines.push(line);
+    }
+
+    pub fn line(&self, instruction: usize) -> Option<Location> {
+        self.lines.get(instruction).copied().flatten()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -529,6 +553,7 @@ pub struct Module {
     function_of_id: Vec<Option<usize>>,
     variable_of_id: Vec<Option<usize>>,
     opencl_std: Option<Id>,
+    strings: Vec<Option<String>>,
 }
 
 impl Module {
@@ -550,6 +575,12 @@ impl Module {
 
     pub fn constant(&self, id: Id) -> Result<&Constant, Error> {
         slot_of(&self.constants, id)?.ok_or(Error::NotAConstant(id))
+    }
+
+    pub fn string(&self, id: Id) -> Result<&str, Error> {
+        slot_of(&self.strings, id)?
+            .map(String::as_str)
+            .ok_or(Error::NotAString(id))
     }
 
     pub fn decorations(&self, id: Id) -> Result<&Decorations, Error> {
@@ -675,6 +706,7 @@ impl ModuleBuilder {
                 function_of_id: vec![None; bound],
                 variable_of_id: vec![None; bound],
                 opencl_std: None,
+                strings: vec![None; bound],
             },
         }
     }
@@ -761,6 +793,12 @@ impl ModuleBuilder {
         slot.rounding_mode = slot.rounding_mode.or(source.rounding_mode);
         slot.packed |= source.packed;
         slot.saturated_conversion |= source.saturated_conversion;
+
+        Ok(())
+    }
+
+    pub fn set_string(&mut self, id: Id, text: String) -> Result<(), Error> {
+        *slot_mut(&mut self.module.strings, id)? = Some(text);
 
         Ok(())
     }

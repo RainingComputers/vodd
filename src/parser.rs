@@ -2,6 +2,16 @@ use crate::bitcode;
 
 const MAGIC: u32 = 0x0723_0203;
 
+const DEBUG_SOURCE: u32 = 35;
+const DEBUG_LINE: u32 = 103;
+const DEBUG_NO_LINE: u32 = 104;
+const DEBUG_SETS: &[&str] = &[
+    "OpenCL.DebugInfo.100",
+    "NonSemantic.Shader.DebugInfo.100",
+    "NonSemantic.Shader.DebugInfo.200",
+    "SPIRV.debug",
+];
+
 struct Reader<'w, I: Iterator<Item = u32>> {
     words: &'w mut I,
     remaining: usize,
@@ -91,6 +101,9 @@ fn parse_inner(words: impl IntoIterator<Item = u32>) -> Result<bitcode::Module, 
     let mut dec_groups: Vec<(bitcode::Id, Vec<bitcode::Id>)> = Vec::new();
     let mut pending_function: Option<bitcode::Function> = None;
     let mut pending_block: Option<bitcode::Block> = None;
+    let mut debug_sets: Vec<bitcode::Id> = Vec::new();
+    let mut debug_files: Vec<Option<bitcode::Id>> = vec![None; bound];
+    let mut current_line: Option<bitcode::Location> = None;
 
     while let Some(header) = words.next() {
         let word_count = (header >> 16) as usize;
@@ -113,10 +126,60 @@ fn parse_inner(words: impl IntoIterator<Item = u32>) -> Result<bitcode::Module, 
             }
             11 => {
                 let result = reader.word()?;
-                if reader.string() == "OpenCL.std" {
+                let name = reader.string();
+
+                if name == "OpenCL.std" {
                     module.set_opencl_std(result);
+                } else if DEBUG_SETS.contains(&name.as_str()) {
+                    debug_sets.push(result);
                 }
             }
+            12 => {
+                let result_type = reader.word()?;
+                let result = reader.word()?;
+                let set = reader.word()?;
+                let instruction = reader.word()?;
+                let operands = reader.rest();
+
+                if debug_sets.contains(&set) {
+                    match instruction {
+                        DEBUG_SOURCE => {
+                            if let (Some(file), Some(slot)) =
+                                (operands.first(), debug_files.get_mut(result as usize))
+                            {
+                                *slot = Some(*file);
+                            }
+                        }
+                        DEBUG_LINE => {
+                            current_line = debug_location(&module, &debug_files, &operands)?;
+                        }
+                        DEBUG_NO_LINE => current_line = None,
+                        _ => {}
+                    }
+                } else if let Some(block) = pending_block.as_mut() {
+                    block.push(
+                        bitcode::Instruction::ExtInst {
+                            result,
+                            result_type,
+                            set,
+                            instruction,
+                            operands,
+                        },
+                        current_line,
+                    );
+                }
+            }
+            7 => {
+                let result = reader.word()?;
+                module.set_string(result, reader.string())?;
+            }
+            8 => {
+                let file = reader.word()?;
+                let line = reader.word()?;
+                let column = reader.word()?;
+                current_line = Some(bitcode::Location { file, line, column });
+            }
+            317 => current_line = None,
             15 => {
                 let _model = reader.word()?;
                 let function = reader.word()?;
@@ -285,7 +348,7 @@ fn parse_inner(words: impl IntoIterator<Item = u32>) -> Result<bitcode::Module, 
                     function.block_of_label[block.label as usize] = Some(function.blocks.len());
                     function.blocks.push(block);
                 }
-                pending_block = Some(bitcode::Block { label, instructions: Vec::new() });
+                pending_block = Some(bitcode::Block::new(label));
             }
             59 => {
                 let result_type = reader.word()?;
@@ -294,11 +357,10 @@ fn parse_inner(words: impl IntoIterator<Item = u32>) -> Result<bitcode::Module, 
                 let initializer = reader.try_word();
 
                 if let Some(block) = pending_block.as_mut() {
-                    block.instructions.push(bitcode::Instruction::Variable {
-                        result,
-                        result_type,
-                        initializer,
-                    });
+                    block.push(
+                        bitcode::Instruction::Variable { result, result_type, initializer },
+                        current_line,
+                    );
                 } else {
                     module.push_variable(bitcode::Variable {
                         result,
@@ -310,7 +372,14 @@ fn parse_inner(words: impl IntoIterator<Item = u32>) -> Result<bitcode::Module, 
             }
             _ => {
                 if let Some(block) = pending_block.as_mut() {
-                    block.instructions.push(parse_body(opcode, &mut reader)?);
+                    let instruction = parse_body(opcode, &mut reader)?;
+                    let ends_block = terminates(&instruction);
+
+                    block.push(instruction, current_line);
+
+                    if ends_block {
+                        current_line = None;
+                    }
                 }
             }
         }
@@ -621,14 +690,6 @@ fn parse_body<I: Iterator<Item = u32>>(
             let rhs = reader.word()?;
             bitcode::Instruction::Dot { result, result_type, lhs, rhs }
         }
-        12 => {
-            let result_type = reader.word()?;
-            let result = reader.word()?;
-            let set = reader.word()?;
-            let instruction = reader.word()?;
-            let operands = reader.rest();
-            bitcode::Instruction::ExtInst { result, result_type, set, instruction, operands }
-        }
         245 => {
             let result_type = reader.word()?;
             let result = reader.word()?;
@@ -683,9 +744,53 @@ fn parse_body<I: Iterator<Item = u32>>(
             bitcode::Instruction::ReturnValue { value }
         }
         255 => bitcode::Instruction::Unreachable,
-        0 | 8 | 317 | 246 | 247 | 256 | 257 => bitcode::Instruction::Nop,
+        0 | 246 | 247 | 256 | 257 => bitcode::Instruction::Nop,
         unsupported => return Err(bitcode::Error::UnsupportedOpcode(unsupported)),
     })
+}
+
+fn debug_location(
+    module: &bitcode::ModuleBuilder,
+    files: &[Option<bitcode::Id>],
+    operands: &[bitcode::Id],
+) -> Result<Option<bitcode::Location>, bitcode::Error> {
+    let [source, line, _, column, _] = operands else {
+        return Ok(None);
+    };
+
+    let Some(Some(file)) = files.get(*source as usize) else {
+        return Ok(None);
+    };
+
+    let line = literal(module, *line)?;
+    if line == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(bitcode::Location {
+        file: *file,
+        line,
+        column: literal(module, *column)?,
+    }))
+}
+
+fn literal(module: &bitcode::ModuleBuilder, id: bitcode::Id) -> Result<u32, bitcode::Error> {
+    match &module.constant(id)?.kind {
+        bitcode::ConstantKind::Scalar { bits } => Ok(*bits as u32),
+        _ => Err(bitcode::Error::NotAConstant(id)),
+    }
+}
+
+fn terminates(instruction: &bitcode::Instruction) -> bool {
+    matches!(
+        instruction,
+        bitcode::Instruction::Branch { .. }
+            | bitcode::Instruction::BranchConditional { .. }
+            | bitcode::Instruction::Switch { .. }
+            | bitcode::Instruction::Return
+            | bitcode::Instruction::ReturnValue { .. }
+            | bitcode::Instruction::Unreachable
+    )
 }
 
 fn set_decoration_groups(

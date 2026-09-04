@@ -19,6 +19,7 @@
         "memobj",
         "Ndrange",
         "nonoverlapping",
+        "nonsemantic",
         "pocl",
         "pointee",
         "progvar",

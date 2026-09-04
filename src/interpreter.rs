@@ -143,6 +143,7 @@ pub struct Interpreter {
     storage: Vec<u8>,
     fuel: usize,
     pending: Option<YieldReason>,
+    location: Option<bitcode::Location>,
 }
 
 pub fn local_memory_size(module: &bitcode::Module) -> Result<usize, Error> {
@@ -240,13 +241,10 @@ impl Interpreter {
         for (parameter, argument) in entry.parameters.iter().zip(arguments) {
             values[parameter.result as usize] = Some(match argument {
                 Argument::Buffer(address) => {
-                    let region = match module.storage_class(parameter.result_type)? {
-                        bitcode::StorageClass::UniformConstant => value::Region::Global,
-                        storage => value::Region::from_storage_class(storage)?,
-                    };
+                    let storage = module.storage_class(parameter.result_type)?;
 
                     value::Value::Pointer(value::Pointer {
-                        region,
+                        region: value::Region::from_storage_class(storage)?,
                         address: *address,
                         pointee_type: module.pointee_type(parameter.result_type)?,
                     })
@@ -267,7 +265,12 @@ impl Interpreter {
             storage: Vec::new(),
             fuel,
             pending: None,
+            location: None,
         })
+    }
+
+    pub fn location(&self) -> Option<bitcode::Location> {
+        self.location
     }
 
     pub fn resume(&mut self, resume: Resume) -> Result<Option<YieldReason>, Error> {
@@ -295,11 +298,14 @@ impl Interpreter {
         let frame = self.frame()?;
         let function = self.module.function(frame.function)?;
         let block = function.block(frame.block)?;
+        let position = frame.instruction;
         let instruction = block
             .instructions
-            .get(frame.instruction)
+            .get(position)
             .cloned()
             .ok_or(Error::EndOfBlock)?;
+
+        self.location = block.line(position);
 
         match &instruction {
             bitcode::Instruction::Nop => self.advance()?,
@@ -846,7 +852,10 @@ impl Interpreter {
                 }));
             }
 
-            let region = value::Region::from_storage_class(variable.storage)?;
+            let region = match variable.storage {
+                bitcode::StorageClass::UniformConstant => value::Region::Module,
+                storage => value::Region::from_storage_class(storage)?,
+            };
             let address = match region {
                 value::Region::Module => offset_of(&self.module_offsets, id)?,
                 value::Region::Local => offset_of(&self.local_offsets, id)?,
