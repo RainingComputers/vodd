@@ -126,6 +126,7 @@ fn run_spirv_case(spirv_case: &SpirvCase, drive: Driver<'_>) -> Result<Vec<u8>, 
             function,
             &arguments,
             FUEL,
+            false,
         )
         .map_err(|error| format!("invocation: {error:?}"))?;
 
@@ -228,7 +229,8 @@ fn driver_inner(
             _ => [0, 0, 0],
         }),
         interpreter::YieldReason::MemoryBarrier { .. }
-        | interpreter::YieldReason::ControlBarrier { .. } => interpreter::Resume::Ack,
+        | interpreter::YieldReason::ControlBarrier { .. }
+        | interpreter::YieldReason::Break => interpreter::Resume::Ack,
     })
 }
 

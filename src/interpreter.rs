@@ -72,6 +72,7 @@ pub enum YieldReason {
         execution_scope: u64,
         semantics: u64,
     },
+    Break,
 }
 
 impl YieldReason {
@@ -85,7 +86,8 @@ impl YieldReason {
                 YieldReason::Write { .. }
                     | YieldReason::WriteLocal { .. }
                     | YieldReason::MemoryBarrier { .. }
-                    | YieldReason::ControlBarrier { .. },
+                    | YieldReason::ControlBarrier { .. }
+                    | YieldReason::Break,
                 Resume::Ack
             ) | (YieldReason::Atomic { .. }, Resume::Scalar(_))
                 | (YieldReason::Builtin(_), Resume::Builtin(_))
@@ -142,7 +144,10 @@ pub struct Interpreter {
     frames: Vec<Frame>,
     storage: Vec<u8>,
     fuel: usize,
+    debug: bool,
     pending: Option<YieldReason>,
+    stepped: bool,
+    broke_at: Option<(bitcode::Id, u32)>,
     location: Option<bitcode::Location>,
 }
 
@@ -206,6 +211,7 @@ impl Interpreter {
         function: bitcode::Id,
         arguments: &[Argument],
         fuel: usize,
+        debug: bool,
     ) -> Result<Interpreter, Error> {
         let mut module_storage: Vec<u8> = Vec::new();
         let mut module_offsets = vec![None; module.bound()];
@@ -264,7 +270,10 @@ impl Interpreter {
             frames: vec![frame],
             storage: Vec::new(),
             fuel,
+            debug,
             pending: None,
+            stepped: false,
+            broke_at: None,
             location: None,
         })
     }
@@ -276,6 +285,10 @@ impl Interpreter {
     pub fn resume(&mut self, resume: Resume) -> Result<Option<YieldReason>, Error> {
         let mut resume = match (self.pending.take(), resume) {
             (None, Resume::Start) => None,
+            (Some(YieldReason::Break), Resume::Ack) => {
+                self.stepped = true;
+                None
+            }
             (Some(reason), resume) if reason.accepts(&resume) => Some(resume),
             _ => return Err(Error::UnexpectedResume),
         };
@@ -286,10 +299,39 @@ impl Interpreter {
             }
             self.fuel -= 1;
 
+            if let Some(reason) = self.resume_debug(resume.as_ref())? {
+                return Ok(Some(reason));
+            }
+
             if let Some(reason) = self.resume_inner(resume.take())? {
                 return Ok(Some(reason));
             }
         }
+
+        Ok(None)
+    }
+
+    fn resume_debug(&mut self, resume: Option<&Resume>) -> Result<Option<YieldReason>, Error> {
+        let frame = self.frame()?;
+        let function = self.module.function(frame.function)?;
+        let block = function.block(frame.block)?;
+        let line = block.line(frame.instruction);
+
+        self.location = line;
+
+        let arrived = line.map(|location| (location.file, location.line));
+
+        if self.debug
+            && !self.stepped
+            && resume.is_none()
+            && arrived.is_some()
+            && arrived != self.broke_at
+        {
+            self.broke_at = arrived;
+            return self.yield_(YieldReason::Break);
+        }
+
+        self.stepped = false;
 
         Ok(None)
     }
@@ -304,8 +346,6 @@ impl Interpreter {
             .get(position)
             .cloned()
             .ok_or(Error::EndOfBlock)?;
-
-        self.location = block.line(position);
 
         match &instruction {
             bitcode::Instruction::Nop => self.advance()?,

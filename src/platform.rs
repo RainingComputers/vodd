@@ -2540,6 +2540,7 @@ impl Launch {
                     self.function,
                     arguments,
                     FUEL,
+                    false,
                 )
                 .map_err(trap)
             })
@@ -2719,7 +2720,8 @@ fn service(
             interpreter::Resume::Builtin(builtin(kind, geometry, group, lane))
         }
         interpreter::YieldReason::MemoryBarrier { .. }
-        | interpreter::YieldReason::ControlBarrier { .. } => interpreter::Resume::Ack,
+        | interpreter::YieldReason::ControlBarrier { .. }
+        | interpreter::YieldReason::Break => interpreter::Resume::Ack,
     })
 }
 
