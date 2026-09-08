@@ -4,22 +4,22 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
 
-mod compile;
+mod common;
 
-use compile::HEADERS;
-use compile::REDIRECT;
-use compile::SPIRV_HEADERS;
-use compile::VODD;
-use compile::build_driver;
-use compile::is_current;
-use compile::link_arguments;
-use compile::modified;
-use compile::newest;
-use compile::run_with_timeout;
-use compile::runtime_environment;
+use common::HEADERS;
+use common::REDIRECT;
+use common::SPIRV_HEADERS;
+use common::VODD;
+use common::build_driver;
+use common::is_current;
+use common::link_arguments;
+use common::modified;
+use common::newest;
+use common::run_with_timeout;
+use common::runtime_environment;
 
 const TIMEOUT: u64 = 300;
-const CTS: &str = "tests/OpenCL-CTS";
+const CTS: &str = "tests/vendor/OpenCL-CTS";
 const HARNESS_SOURCES: &[&str] = &[
     "harness/alloc.cpp",
     "harness/typeWrappers.cpp",
@@ -338,7 +338,7 @@ fn compile_arguments() -> Vec<String> {
 }
 
 fn load_opencl_cases(target: &str) -> Vec<OpenclCase> {
-    let path = "tests/opencl.yaml";
+    let path = "tests/data/conformance.yaml";
     let text = std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{path}: {error}"));
     let documents = yaml_rust2::YamlLoader::load_from_str(&text)
         .unwrap_or_else(|error| panic!("{path} is not valid YAML: {error}"));

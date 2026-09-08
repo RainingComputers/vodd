@@ -1,12 +1,12 @@
 [submodule "tests/OpenCL-CTS"]
-	path = tests/OpenCL-CTS
+	path = tests/vendor/OpenCL-CTS
 	url = https://github.com/KhronosGroup/OpenCL-CTS.git
 	shallow = true
 [submodule "tests/OpenCL-Headers"]
-	path = tests/OpenCL-Headers
+	path = tests/vendor/OpenCL-Headers
 	url = https://github.com/KhronosGroup/OpenCL-Headers.git
 	shallow = true
 [submodule "tests/SPIRV-Headers"]
-	path = tests/SPIRV-Headers
+	path = tests/vendor/SPIRV-Headers
 	url = https://github.com/KhronosGroup/SPIRV-Headers.git
 	shallow = true

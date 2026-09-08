@@ -1,14 +1,14 @@
-mod compile;
+mod common;
 
-use compile::HEADERS;
-use compile::REDIRECT;
-use compile::VODD;
-use compile::build_driver;
-use compile::documents;
-use compile::is_current;
-use compile::link_arguments;
-use compile::run_with_timeout;
-use compile::runtime_environment;
+use common::HEADERS;
+use common::REDIRECT;
+use common::VODD;
+use common::build_driver;
+use common::documents;
+use common::is_current;
+use common::link_arguments;
+use common::run_with_timeout;
+use common::runtime_environment;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -16,9 +16,12 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const TIMEOUT: u64 = 60;
-const HOST: &str = "tests/oclgrind/host.c";
+const HOST: &str = "tests/support/host.c";
 const ARTIFACTS: &str = "target/oclgrind";
-const TABLES: &[&str] = &["tests/oclgrind.yaml", "tests/vodd.yaml"];
+const TABLES: &[&str] = &[
+    "tests/data/kernels/oclgrind.yaml",
+    "tests/data/kernels/vodd.yaml",
+];
 
 type Counts = BTreeMap<String, usize>;
 

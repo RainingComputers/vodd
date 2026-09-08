@@ -4,37 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-pub const VODD: &str = "vodd";
-pub const HEADERS: &str = "tests/OpenCL-Headers";
-pub const SPIRV_HEADERS: &str = "tests/SPIRV-Headers/include";
-pub const REDIRECT: &str = "tests/opencl/include";
-
-pub fn run_with_timeout(command: &mut Command, seconds: u64) -> Result<(), String> {
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("spawning the suite: {error}"))?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
-
-    loop {
-        match child
-            .try_wait()
-            .map_err(|error| format!("waiting for the suite: {error}"))?
-        {
-            Some(status) if status.code().is_some() => return Ok(()),
-            Some(_) => return Err("terminated by signal".to_string()),
-            None => {}
-        }
-
-        if std::time::Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-
-            return Err(format!("timed out after {seconds}s"));
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-}
+use super::VODD;
 
 pub fn build_driver(target: &str) -> Result<String, String> {
     let driver = "target/release".to_string();
@@ -140,28 +110,6 @@ pub fn modified(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path)
         .and_then(|data| data.modified())
         .ok()
-}
-
-pub fn string_field<'y>(entry: &'y yaml_rust2::Yaml, name: &str, context: &str) -> &'y str {
-    entry[name]
-        .as_str()
-        .unwrap_or_else(|| panic!("{context}: {name} is missing or is not a string"))
-}
-
-pub fn integer_field(entry: &yaml_rust2::Yaml, name: &str, context: &str) -> usize {
-    entry[name]
-        .as_i64()
-        .unwrap_or_else(|| panic!("{context}: {name} is missing or is not an integer")) as usize
-}
-
-pub fn documents(path: &str) -> yaml_rust2::Yaml {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{path}: {error}"));
-
-    yaml_rust2::YamlLoader::load_from_str(&text)
-        .unwrap_or_else(|error| panic!("{path} is not valid YAML: {error}"))
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| panic!("{path} is empty"))
 }
 
 pub fn compile_c(

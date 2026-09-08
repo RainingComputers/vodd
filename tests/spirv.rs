@@ -2,10 +2,10 @@ use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
 
-mod compile;
+mod common;
 
-use compile::integer_field;
-use compile::string_field;
+use common::integer_field;
+use common::string_field;
 
 use vodd::address;
 use vodd::bitcode;
@@ -328,7 +328,7 @@ fn write(buffers: &mut Buffers, address: u64, bytes: &[u8]) -> Result<(), String
 }
 
 fn load_spirv_cases() -> Vec<SpirvCase> {
-    let path = "tests/spirv.yaml";
+    let path = "tests/data/spirv.yaml";
     let text = std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{path}: {error}"));
     let documents = yaml_rust2::YamlLoader::load_from_str(&text)
         .unwrap_or_else(|error| panic!("{path} is not valid YAML: {error}"));
