@@ -4,12 +4,22 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
 
-const VODD: &str = "vodd";
+mod compile;
+
+use compile::HEADERS;
+use compile::REDIRECT;
+use compile::SPIRV_HEADERS;
+use compile::VODD;
+use compile::build_driver;
+use compile::is_current;
+use compile::link_arguments;
+use compile::modified;
+use compile::newest;
+use compile::run_with_timeout;
+use compile::runtime_environment;
+
 const TIMEOUT: u64 = 300;
 const CTS: &str = "tests/OpenCL-CTS";
-const HEADERS: &str = "tests/OpenCL-Headers";
-const SPIRV_HEADERS: &str = "tests/SPIRV-Headers/include";
-const REDIRECT: &str = "tests/opencl/include";
 const HARNESS_SOURCES: &[&str] = &[
     "harness/alloc.cpp",
     "harness/typeWrappers.cpp",
@@ -172,33 +182,6 @@ fn list_tests(binary: &Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
-fn run_with_timeout(command: &mut Command, seconds: u64) -> Result<(), String> {
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("spawning the suite: {error}"))?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
-
-    loop {
-        match child
-            .try_wait()
-            .map_err(|error| format!("waiting for the suite: {error}"))?
-        {
-            Some(status) if status.code().is_some() => return Ok(()),
-            Some(_) => return Err("terminated by signal".to_string()),
-            None => {}
-        }
-
-        if std::time::Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-
-            return Err(format!("timed out after {seconds}s"));
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-}
-
 fn build_suite(
     suite: &str,
     harness: &[PathBuf],
@@ -247,39 +230,6 @@ fn build_suite(
     }
 
     Ok(binary)
-}
-
-fn build_driver(target: &str) -> Result<String, String> {
-    let driver = "target/release".to_string();
-
-    if target != VODD {
-        return Ok(driver);
-    }
-
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let mut command = Command::new(cargo);
-
-    command.args(["build", "--release"]);
-
-    println!("driver [{target}]: building {driver}, which the suites link against");
-
-    let output = command
-        .output()
-        .map_err(|error| format!("building the vodd driver: {error}"))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "building the vodd driver: {}",
-            String::from_utf8_lossy(&output.stderr)
-                .lines()
-                .filter(|line| line.starts_with("error"))
-                .take(4)
-                .collect::<Vec<_>>()
-                .join("; ")
-        ));
-    }
-
-    Ok(driver)
 }
 
 fn build_harness(artifacts: &str) -> Result<Vec<PathBuf>, String> {
@@ -385,62 +335,6 @@ fn compile_arguments() -> Vec<String> {
     .iter()
     .map(|argument| argument.to_string())
     .collect()
-}
-
-fn link_arguments(target: &str, driver: &str) -> Result<Vec<String>, String> {
-    if target != VODD {
-        let loader = std::env::var("VODD_OPENCL_LOADER")
-            .unwrap_or_else(|_| "/opt/homebrew/opt/opencl-icd-loader".to_string());
-
-        return Ok(vec![format!("-L{loader}/lib"), "-lOpenCL".to_string()]);
-    }
-
-    let library = Path::new(driver).join("libvodd.dylib");
-    if !library.exists() {
-        return Err(format!(
-            "{} is missing; run: cargo build",
-            library.display()
-        ));
-    }
-
-    Ok(vec![
-        format!("-L{driver}"),
-        "-lvodd".to_string(),
-        "-Wl,-undefined,dynamic_lookup".to_string(),
-    ])
-}
-
-fn runtime_environment(target: &str, driver: &str) -> Vec<(String, String)> {
-    let library_path = (target == VODD).then(|| {
-        (
-            "DYLD_LIBRARY_PATH".to_string(),
-            std::fs::canonicalize(driver)
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|_| driver.to_string()),
-        )
-    });
-
-    library_path.into_iter().chain(macos_sdk()).collect()
-}
-
-fn macos_sdk() -> Vec<(String, String)> {
-    if !cfg!(target_os = "macos") {
-        return Vec::new();
-    }
-
-    let Ok(output) = Command::new("xcrun").args(["--show-sdk-path"]).output() else {
-        return Vec::new();
-    };
-
-    let sdk = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if sdk.is_empty() {
-        return Vec::new();
-    }
-
-    vec![
-        ("SDKROOT".to_string(), sdk.clone()),
-        ("LIBRARY_PATH".to_string(), format!("{sdk}/usr/lib")),
-    ]
 }
 
 fn load_opencl_cases(target: &str) -> Vec<OpenclCase> {
@@ -619,13 +513,6 @@ fn compare(opencl_case: &OpenclCase, produced: &StringMap) -> Result<(), String>
     }
 }
 
-fn is_current(object: &Path, source: &Path) -> bool {
-    match (modified(object), modified(source)) {
-        (Some(built), Some(edited)) => built > edited,
-        _ => false,
-    }
-}
-
 fn source_files(directory: &Path) -> Result<Vec<PathBuf>, String> {
     let mut sources: Vec<PathBuf> = std::fs::read_dir(directory)
         .map_err(|error| format!("reading {}: {error}", directory.display()))?
@@ -645,14 +532,4 @@ fn source_files(directory: &Path) -> Result<Vec<PathBuf>, String> {
     sources.sort();
 
     Ok(sources)
-}
-
-fn newest(paths: &[PathBuf]) -> Option<std::time::SystemTime> {
-    paths.iter().filter_map(|path| modified(path)).max()
-}
-
-fn modified(path: &Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(path)
-        .and_then(|data| data.modified())
-        .ok()
 }

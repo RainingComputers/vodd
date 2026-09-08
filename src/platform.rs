@@ -2250,8 +2250,8 @@ impl Kernel {
         let (module, function, required_work_group_size) = Program::entry(program, &name)?;
         let signature = Self::signature(&module, function)?;
         let context = Program::context(program)?;
-        let (local_variables, local_storage) =
-            interpreter::local_layout(&module).map_err(|_| Error::InvalidKernelDefinition)?;
+        let (local_variables, local_storage) = interpreter::local_layout(&module, function)
+            .map_err(|_| Error::InvalidKernelDefinition)?;
 
         Program::retain(program)?;
         Program::attach(program)?;
@@ -2419,6 +2419,11 @@ impl Kernel {
                     Ok(bitcode::StorageClass::CrossWorkgroup) => Ok(ArgumentKind::Global),
                     Ok(bitcode::StorageClass::Workgroup) => Ok(ArgumentKind::Local),
                     Ok(bitcode::StorageClass::UniformConstant) => Ok(ArgumentKind::Constant),
+                    Ok(bitcode::StorageClass::Function) => module
+                        .pointee_type(parameter.result_type)
+                        .and_then(|pointee| module.layout(pointee))
+                        .map(|layout| ArgumentKind::Value(layout.size))
+                        .map_err(|_| Error::InvalidKernelDefinition),
                     Ok(_) => Err(Error::InvalidKernelDefinition),
                     Err(_) => module
                         .layout(parameter.result_type)
@@ -2847,7 +2852,7 @@ fn service(
             comparator,
         } => {
             let size = width.div_ceil(8) as usize;
-            let at = detectors::Access::new(address, size, true, true, None);
+            let at = detectors::Access::new(address, size, true, true, location);
 
             let update = |destination: &mut [u8]| -> Result<u64> {
                 let mut bytes = [0u8; 8];
@@ -2862,7 +2867,8 @@ fn service(
                 let (loads, stores) = atomic_effects(operation, previous, comparator);
 
                 if loads {
-                    races.record(entity, at, &[]);
+                    let read = detectors::Access::new(address, size, false, true, location);
+                    races.record(entity, read, &[]);
                 }
 
                 if stores {
@@ -2927,6 +2933,7 @@ fn builtin(kind: bitcode::Builtin, geometry: &Grid, entity: detectors::Entity) -
         bitcode::Builtin::NumWorkgroups => geometry.work_group_count(),
         bitcode::Builtin::WorkgroupSize => geometry.local,
         bitcode::Builtin::GlobalOffset => geometry.offset,
+        bitcode::Builtin::GlobalSize => geometry.global,
     }
 }
 

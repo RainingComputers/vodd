@@ -595,6 +595,19 @@ fn parse_body<I: Iterator<Item = u32>>(
             let alignment = memory_alignment(reader);
             bitcode::Instruction::Store { pointer, object, alignment }
         }
+        63 => {
+            let target = reader.word()?;
+            let source = reader.word()?;
+            let _ = memory_alignment(reader);
+            bitcode::Instruction::CopyMemory { target, source, size: None }
+        }
+        64 => {
+            let target = reader.word()?;
+            let source = reader.word()?;
+            let size = reader.word()?;
+            let _ = memory_alignment(reader);
+            bitcode::Instruction::CopyMemory { target, source, size: Some(size) }
+        }
         65 | 66 => {
             let result_type = reader.word()?;
             let result = reader.word()?;

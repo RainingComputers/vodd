@@ -747,7 +747,7 @@ opencl_cases:
         simple_static_compile_only: pass
         two_file_link: fail
         two_file_regular_function_access: pass
-        two_file_regular_struct_access: fail
+        two_file_regular_struct_access: pass
         two_file_regular_variable_access: pass
         unload_build_info: pass
         unload_build_threaded: pass
@@ -845,7 +845,6 @@ opencl_cases:
         simple_embedded_header_link: 'clang mis-types its __clang_ocl_kern_imp_ wrapper for extern __kernel, so spirv-link rejects it'
         simple_library_with_link: 'clang mis-types its __clang_ocl_kern_imp_ wrapper for extern __kernel, so spirv-link rejects it'
         two_file_link: 'clang mis-types its __clang_ocl_kern_imp_ wrapper for extern __kernel, so spirv-link rejects it'
-        two_file_regular_struct_access: 'clang mis-types its __clang_ocl_kern_imp_ wrapper for extern __kernel, so spirv-link rejects it'
       pocl:
         get_program_info_mult_devices: 'PoCL exposes a single device, but the test needs two'
         link_error_returns_program: 'PoCL returns no program object on link failure'

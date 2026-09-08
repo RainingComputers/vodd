@@ -1,9 +1,11 @@
 {
     "cSpell.words": [
+        "alloca",
         "badvalue",
         "Bitcast",
         "bitcode",
         "bitfield",
+        "byval",
         "CACHELINE",
         "cles",
         "componentwise",
@@ -16,11 +18,15 @@
         "finclude",
         "Fmax",
         "Fmin",
+        "intragroup",
+        "memcheck",
         "memobj",
         "misindexed",
+        "multidim",
         "Ndrange",
         "nonoverlapping",
         "nonsemantic",
+        "oclgrind",
         "optimisation",
         "pocl",
         "pointee",
@@ -38,6 +44,8 @@
         "waitlist",
         "waitlists",
         "Workgroups",
+        "workitem",
+        "Wunused",
         "Xclang"
     ]
 }

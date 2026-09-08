@@ -3,6 +3,8 @@ use crate::bitcode;
 use crate::detectors;
 use crate::value;
 
+use std::sync::Arc;
+
 pub use crate::bitcode::AtomicOp as Atomic;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,11 +151,11 @@ impl Frame {
 
 #[derive(Debug, Clone)]
 pub struct Interpreter {
-    module: std::sync::Arc<bitcode::Module>,
+    module: Arc<bitcode::Module>,
     mutable_storage: address::Storage,
     constant_storage: address::Storage,
     private_addresses: Vec<Option<u64>>,
-    local_addresses: std::sync::Arc<Vec<Option<u64>>>,
+    local_addresses: Arc<Vec<Option<u64>>>,
     frames: Vec<Frame>,
     storage: address::Storage,
     fuel: usize,
@@ -173,6 +175,7 @@ pub fn builtin_to_addr(builtin: bitcode::Builtin) -> u64 {
         bitcode::Builtin::LocalInvocationId => 400,
         bitcode::Builtin::GlobalInvocationId => 500,
         bitcode::Builtin::GlobalOffset => 600,
+        bitcode::Builtin::GlobalSize => 700,
     };
 
     address::encode(Some(address::Region::Builtin), slot, 0)
@@ -188,6 +191,7 @@ pub fn builtin_from_addr(address: u64) -> Result<bitcode::Builtin, Error> {
         (Some(address::Region::Builtin), 400) => bitcode::Builtin::LocalInvocationId,
         (Some(address::Region::Builtin), 500) => bitcode::Builtin::GlobalInvocationId,
         (Some(address::Region::Builtin), 600) => bitcode::Builtin::GlobalOffset,
+        (Some(address::Region::Builtin), 700) => bitcode::Builtin::GlobalSize,
         (_, slot) => return Err(bitcode::Error::UnsupportedBuiltin(slot as u32).into()),
     })
 }
@@ -226,14 +230,22 @@ fn private_layout(
 
 pub fn local_layout(
     module: &bitcode::Module,
-) -> Result<(std::sync::Arc<Vec<Option<u64>>>, address::Storage), Error> {
+    entry: bitcode::Id,
+) -> Result<(Arc<Vec<Option<u64>>>, address::Storage), Error> {
     let mut addresses = vec![None; module.bound()];
     let mut storage = address::Storage::new(address::Region::Local);
+    let named = module.referenced_from(entry);
 
     let stored = module
         .variables()
         .iter()
-        .filter(|variable| variable.storage == bitcode::StorageClass::Workgroup);
+        .filter(|variable| variable.storage == bitcode::StorageClass::Workgroup)
+        .filter(|variable| {
+            named
+                .get(variable.result as usize)
+                .copied()
+                .unwrap_or(false)
+        });
 
     for variable in stored {
         let pointee_type = module.pointee_type(variable.result_type)?;
@@ -246,7 +258,7 @@ pub fn local_layout(
         addresses[variable.result as usize] = Some(address);
     }
 
-    Ok((std::sync::Arc::new(addresses), storage))
+    Ok((Arc::new(addresses), storage))
 }
 
 fn address_of(addresses: &[Option<u64>], id: bitcode::Id) -> Result<u64, Error> {
@@ -279,10 +291,10 @@ fn insert(
 
 impl Interpreter {
     pub fn new(
-        module: std::sync::Arc<bitcode::Module>,
+        module: Arc<bitcode::Module>,
         function: bitcode::Id,
         arguments: &[Argument],
-        local_addresses: std::sync::Arc<Vec<Option<u64>>>,
+        local_addresses: Arc<Vec<Option<u64>>>,
         fuel: usize,
         debug: bool,
         checks: detectors::Checks,
@@ -295,13 +307,31 @@ impl Interpreter {
         }
 
         let mut values = vec![None; module.bound()];
+        let mut storage = address::Storage::new(address::Region::Invocation);
 
         for (parameter, argument) in entry.parameters.iter().zip(arguments) {
+            let byval =
+                module.storage_class(parameter.result_type) == Ok(bitcode::StorageClass::Function);
+
             values[parameter.result as usize] = Some(match argument {
                 Argument::Buffer(address) => value::Value::Pointer(value::Pointer {
                     address: *address,
                     pointee_type: module.pointee_type(parameter.result_type)?,
                 }),
+                Argument::Value(bytes) if byval => {
+                    let pointee_type = module.pointee_type(parameter.result_type)?;
+                    let layout = module.layout(pointee_type)?;
+                    let address = storage
+                        .allocate(layout.size, layout.alignment)
+                        .ok_or(Error::OutOfSlots)?;
+
+                    let size = bytes.len().min(layout.size);
+                    storage
+                        .write(address, size)?
+                        .copy_from_slice(&bytes[..size]);
+
+                    value::Value::Pointer(value::Pointer { address, pointee_type })
+                }
                 Argument::Value(bytes) => value::decode(&module, parameter.result_type, bytes)?,
             });
         }
@@ -315,7 +345,7 @@ impl Interpreter {
             private_addresses,
             local_addresses,
             frames: vec![frame],
-            storage: address::Storage::new(address::Region::Invocation),
+            storage,
             fuel,
             debug,
             checks,
@@ -429,9 +459,7 @@ impl Interpreter {
                 self.bind(*result, value::Value::Pointer(pointer))?;
                 self.advance()?;
 
-                if !diagnostics.is_empty() {
-                    return self.yield_(YieldReason::Diagnostic(diagnostics));
-                }
+                return self.yield_diagnostics(diagnostics);
             }
 
             bitcode::Instruction::Load { result, pointer, alignment, .. } => {
@@ -448,9 +476,7 @@ impl Interpreter {
                         let mut diagnostics = detectors::DiagnosticList::new();
                         diagnostics.extend(self.alignment(target, size, *alignment, false)?);
 
-                        if !diagnostics.is_empty() {
-                            return self.yield_(YieldReason::Diagnostic(diagnostics));
-                        }
+                        return self.yield_diagnostics(diagnostics);
                     }
                     Some(Resume::Builtin(raw)) => {
                         let value = value::from_raw(&self.module, target.pointee_type, raw)?;
@@ -484,9 +510,7 @@ impl Interpreter {
                                 diagnostics
                                     .extend(self.alignment(target, size, *alignment, false)?);
 
-                                if !diagnostics.is_empty() {
-                                    return self.yield_(YieldReason::Diagnostic(diagnostics));
-                                }
+                                return self.yield_diagnostics(diagnostics);
                             }
                         }
                     }
@@ -504,9 +528,7 @@ impl Interpreter {
                         let mut diagnostics = detectors::DiagnosticList::new();
                         diagnostics.extend(self.alignment(target, size, *alignment, true)?);
 
-                        if !diagnostics.is_empty() {
-                            return self.yield_(YieldReason::Diagnostic(diagnostics));
-                        }
+                        return self.yield_diagnostics(diagnostics);
                     }
                     Some(_) => return Err(Error::UnexpectedResume),
                     None => {
@@ -543,9 +565,45 @@ impl Interpreter {
 
                                 diagnostics.extend(self.alignment(target, size, *alignment, true)?);
 
-                                if !diagnostics.is_empty() {
-                                    return self.yield_(YieldReason::Diagnostic(diagnostics));
-                                }
+                                return self.yield_diagnostics(diagnostics);
+                            }
+                        }
+                    }
+                }
+            }
+
+            bitcode::Instruction::CopyMemory { target, source, size } => {
+                let destination = self.value(*target)?.as_pointer()?;
+                let origin = self.value(*source)?.as_pointer()?;
+
+                let count = match size {
+                    Some(size) => self.value(*size)?.as_bits()? as usize,
+                    None => self.module.layout(origin.pointee_type)?.size,
+                };
+
+                match resume.take() {
+                    Some(Resume::Bytes(bytes)) => {
+                        let carried = detectors::DiagnosticList::new();
+
+                        return self.copy_out(destination, &bytes, carried);
+                    }
+                    Some(Resume::Ack) => self.advance()?,
+                    Some(_) => return Err(Error::UnexpectedResume),
+                    None => {
+                        let address = origin.address;
+
+                        match address::region(address) {
+                            Some(address::Region::Global) | None => {
+                                return self.yield_(YieldReason::Read { address, size: count });
+                            }
+                            Some(address::Region::Local) => {
+                                return self
+                                    .yield_(YieldReason::ReadLocal { address, size: count });
+                            }
+                            _ => {
+                                let (bytes, diagnostics) = self.read_bytes(origin, count)?;
+
+                                return self.copy_out(destination, &bytes, diagnostics);
                             }
                         }
                     }
@@ -580,9 +638,7 @@ impl Interpreter {
                 self.bind(*result, value::Value::Pointer(pointer))?;
                 self.advance()?;
 
-                if !diagnostics.is_empty() {
-                    return self.yield_(YieldReason::Diagnostic(diagnostics));
-                }
+                return self.yield_diagnostics(diagnostics);
             }
 
             bitcode::Instruction::Unary { result, result_type, operation, operand } => {
@@ -817,9 +873,7 @@ impl Interpreter {
                         let mut diagnostics = detectors::DiagnosticList::new();
                         diagnostics.extend(self.atomic_width(target, width));
 
-                        if !diagnostics.is_empty() {
-                            return self.yield_(YieldReason::Diagnostic(diagnostics));
-                        }
+                        return self.yield_diagnostics(diagnostics);
                     }
                     Some(_) => return Err(Error::UnexpectedResume),
                     None => {
@@ -937,6 +991,16 @@ impl Interpreter {
     fn yield_(&mut self, reason: YieldReason) -> Result<Option<YieldReason>, Error> {
         self.pending = Some(reason.clone());
         Ok(Some(reason))
+    }
+
+    fn yield_diagnostics(
+        &mut self,
+        diagnostics: detectors::DiagnosticList,
+    ) -> Result<Option<YieldReason>, Error> {
+        match diagnostics.is_empty() {
+            true => Ok(None),
+            false => self.yield_(YieldReason::Diagnostic(diagnostics)),
+        }
     }
 
     fn alignment(
@@ -1075,6 +1139,90 @@ impl Interpreter {
         self.frame_mut()?.values[id as usize] = Some(value);
 
         Ok(())
+    }
+
+    fn read_bytes(
+        &mut self,
+        pointer: value::Pointer,
+        size: usize,
+    ) -> Result<(Vec<u8>, detectors::DiagnosticList), Error> {
+        let Interpreter {
+            storage, mutable_storage, constant_storage, checks, location, ..
+        } = self;
+
+        let source = match address::region(pointer.address) {
+            Some(address::Region::Invocation) => storage,
+            Some(address::Region::Mutable) => mutable_storage,
+            Some(address::Region::Constant) => constant_storage,
+            _ => return Err(Error::UnsupportedRegion),
+        };
+
+        detectors::checked_read(
+            source,
+            *checks,
+            detectors::Access::new(pointer.address, size, false, false, *location),
+            |bytes| -> Result<Vec<u8>, Error> { Ok(bytes.to_vec()) },
+            || Ok(vec![0u8; size]),
+        )
+    }
+
+    fn copy_out(
+        &mut self,
+        destination: value::Pointer,
+        bytes: &[u8],
+        mut carried: detectors::DiagnosticList,
+    ) -> Result<Option<YieldReason>, Error> {
+        let address = destination.address;
+
+        match address::region(address) {
+            Some(address::Region::Global) | None => {
+                self.yield_(YieldReason::Write { address, bytes: bytes.to_vec() })
+            }
+            Some(address::Region::Local) => {
+                self.yield_(YieldReason::WriteLocal { address, bytes: bytes.to_vec() })
+            }
+            Some(address::Region::Constant) | Some(address::Region::Builtin) => {
+                Err(Error::ReadOnlyRegion)
+            }
+            _ => {
+                carried.extend(self.write_bytes(destination, bytes)?);
+
+                self.advance()?;
+
+                self.yield_diagnostics(carried)
+            }
+        }
+    }
+
+    fn write_bytes(
+        &mut self,
+        pointer: value::Pointer,
+        bytes: &[u8],
+    ) -> Result<detectors::DiagnosticList, Error> {
+        let Interpreter { storage, mutable_storage, checks, location, .. } = self;
+
+        let target = match address::region(pointer.address) {
+            Some(address::Region::Invocation) => storage,
+            Some(address::Region::Mutable) => mutable_storage,
+            Some(address::Region::Constant) | Some(address::Region::Builtin) => {
+                return Err(Error::ReadOnlyRegion);
+            }
+            _ => return Err(Error::UnsupportedRegion),
+        };
+
+        let (_, diagnostics) = detectors::checked_write(
+            target,
+            *checks,
+            detectors::Access::new(pointer.address, bytes.len(), true, false, *location),
+            |destination| -> Result<(), Error> {
+                destination.copy_from_slice(bytes);
+
+                Ok(())
+            },
+            || Ok(()),
+        )?;
+
+        Ok(diagnostics)
     }
 
     fn read_internal(

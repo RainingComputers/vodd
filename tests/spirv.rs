@@ -2,6 +2,11 @@ use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
 
+mod compile;
+
+use compile::integer_field;
+use compile::string_field;
+
 use vodd::address;
 use vodd::bitcode;
 use vodd::detectors;
@@ -127,7 +132,7 @@ fn run_spirv_case(spirv_case: &SpirvCase, drive: Driver<'_>) -> Result<Vec<u8>, 
             std::sync::Arc::clone(&module),
             function,
             &arguments,
-            interpreter::local_layout(&module)
+            interpreter::local_layout(&module, function)
                 .map_err(|error| format!("local memory: {error:?}"))?
                 .0,
             FUEL,
@@ -405,18 +410,6 @@ fn yield_reason(entry: &yaml_rust2::Yaml, context: &str) -> interpreter::YieldRe
         },
         other => panic!("{context}: unknown expected yield kind {other}"),
     }
-}
-
-fn string_field<'y>(entry: &'y yaml_rust2::Yaml, name: &str, context: &str) -> &'y str {
-    entry[name]
-        .as_str()
-        .unwrap_or_else(|| panic!("{context}: {name} is missing or is not a string"))
-}
-
-fn integer_field(entry: &yaml_rust2::Yaml, name: &str, context: &str) -> usize {
-    entry[name]
-        .as_i64()
-        .unwrap_or_else(|| panic!("{context}: {name} is missing or is not an integer")) as usize
 }
 
 fn compare(spirv_case: &SpirvCase, produced: &[u8]) -> Result<(), String> {

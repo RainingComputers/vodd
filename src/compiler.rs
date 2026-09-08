@@ -21,6 +21,7 @@ const COMPILERS: &[&str] = &[
     "clang",
 ];
 const SPIRV_VERSION: &str = "1.1";
+const UNUSED: &str = "-Wno-unused-command-line-argument";
 const SUPPLIED: &[&str] = &[
     "atomic_inc",
     "atomic_dec",
@@ -198,8 +199,13 @@ pub fn compile(
 }
 
 fn arguments(options: &str, staged: bool, enable_opt: Option<bool>) -> Vec<String> {
+    let disabled = options
+        .split_whitespace()
+        .any(|option| option == "-cl-opt-disable");
+
     let optimisation = match (enable_opt, staged) {
         (Some(false), _) => Some("-O0"),
+        (_, true) if disabled => Some("-O0"),
         (_, true) => Some("-O2"),
         (_, false) => None,
     };
@@ -214,7 +220,7 @@ fn arguments(options: &str, staged: bool, enable_opt: Option<bool>) -> Vec<Strin
         .iter()
         .chain(staging)
         .chain(optimisation.iter())
-        .chain(["-Xclang", "-finclude-default-header", "-c"].iter())
+        .chain(["-Xclang", "-finclude-default-header", "-c", UNUSED].iter())
         .map(|argument| argument.to_string())
         .chain(options.split_whitespace().map(|option| option.to_string()))
         .collect()

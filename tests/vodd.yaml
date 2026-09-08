@@ -1,0 +1,355 @@
+metadata:
+  origin:
+    project: vodd
+    note: cases with no Oclgrind equivalent
+
+cases:
+  - name: static_array_in_bounds
+    entry: entry
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 4 }
+    expected: {}
+    source: |
+      kernel void entry(global char *output)
+      {
+      int i = get_global_id(0);
+      char b[4];
+      b[0] = 42;
+      b[1] = 7;
+      b[2] = 3;
+      b[3] = 9;
+      output[i] = b[i];
+      }
+
+  - name: unaligned_store
+    entry: entry
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 16 }
+    expected:
+      misaligned: 1
+    source: |
+      kernel void entry(global int *out)
+      {
+      global char *bytes = (global char *)out + 2;
+      *(global int *)bytes = 42;
+      }
+
+  - name: aligned_load
+    entry: entry
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16 }
+      - { buffer: 16 }
+    expected: {}
+    source: |
+      kernel void entry(global int *in, global int *out)
+      {
+      int i = get_global_id(0);
+      out[i] = in[i] + 1;
+      }
+
+  - name: aligned_vector_load
+    entry: entry
+    global_size: [2, 1, 1]
+    local_size: [2, 1, 1]
+    arguments:
+      - { buffer: 32 }
+      - { buffer: 32 }
+    expected: {}
+    source: |
+      kernel void entry(global float4 *in, global float4 *out)
+      {
+      int i = get_global_id(0);
+      out[i] = in[i] * 2.0f;
+      }
+
+  - name: unaligned_atomic
+    entry: entry
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 16 }
+    expected:
+      misaligned: 1
+    source: |
+      kernel void entry(global int *data)
+      {
+      global char *bytes = (global char *)data + 1;
+      atomic_inc((global int *)bytes);
+      }
+
+  - name: barrier_uniform
+    entry: entry
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16 }
+    expected: {}
+    source: |
+      kernel void entry(global int *data)
+      {
+      local int scratch[4];
+      int i = get_local_id(0);
+      scratch[i] = i;
+      barrier(CLK_LOCAL_MEM_FENCE);
+      data[i] = scratch[(i + 1) % 4];
+      }
+
+  - name: local_shared_between_work_items
+    entry: entry
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16 }
+    expected: {}
+    source: |
+      kernel void entry(global int *data)
+      {
+      local int scratch[4];
+      int i = get_local_id(0);
+      scratch[i] = i + 1;
+      barrier(CLK_LOCAL_MEM_FENCE);
+      data[scratch[(i + 1) % 4] - 1] = i;
+      }
+
+  - name: local_write_out_of_bounds
+    entry: entry
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16 }
+    expected:
+      array_index: 4
+      invalid_access: 4
+    source: |
+      kernel void entry(global int *data)
+      {
+      local int scratch[4];
+      int i = get_local_id(0);
+      scratch[i + 4] = i;
+      barrier(CLK_LOCAL_MEM_FENCE);
+      data[0] = scratch[0];
+      }
+
+  - name: local_read_out_of_bounds
+    entry: entry
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16 }
+    expected:
+      array_index: 4
+      invalid_access: 4
+    source: |
+      kernel void entry(global int *data)
+      {
+      local int scratch[4];
+      int i = get_local_id(0);
+      scratch[i] = i;
+      barrier(CLK_LOCAL_MEM_FENCE);
+      data[i] = scratch[i + 4];
+      }
+
+  - name: private_out_of_bounds
+    entry: entry
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16 }
+    expected:
+      array_index: 4
+      invalid_access: 4
+    source: |
+      kernel void entry(global int *data)
+      {
+      volatile int scratch[4];
+      int i = get_global_id(0);
+      scratch[i] = i;
+      data[i] = scratch[i + 4];
+      }
+
+  - name: in_bounds_access
+    entry: entry
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16 }
+      - { buffer: 16 }
+    expected: {}
+    source: |
+      kernel void entry(global int *in, global int *out)
+      {
+      int i = get_global_id(0);
+      out[i] = in[i] + 1;
+      }
+
+  - name: barrier_separated_no_race
+    entry: entry
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16 }
+    expected: {}
+    source: |
+      kernel void entry(global int *data)
+      {
+      local int scratch[4];
+      int i = get_local_id(0);
+      scratch[i] = i;
+      barrier(CLK_LOCAL_MEM_FENCE);
+      data[i] = scratch[(i + 1) % 4];
+      }
+
+  - name: disjoint_no_race
+    entry: entry
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16 }
+    expected: {}
+    source: |
+      kernel void entry(global int *data)
+      {
+      int i = get_global_id(0);
+      data[i] = i;
+      }
+
+  - name: intergroup_disjoint_no_race
+    entry: entry
+    global_size: [8, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 32 }
+    expected: {}
+    source: |
+      kernel void entry(global int *data)
+      {
+      int i = get_global_id(0);
+      data[i] = i;
+      }
+
+  - name: intergroup_local_no_race
+    entry: entry
+    global_size: [8, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 32 }
+    expected: {}
+    source: |
+      kernel void entry(global int *data)
+      {
+      local int scratch[4];
+      int i = get_local_id(0);
+      int g = get_group_id(0);
+      scratch[i] = g;
+      data[get_global_id(0)] = g;
+      }
+
+  - name: combined_fence_clears_global
+    entry: entry
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16 }
+      - { buffer: 16 }
+    expected: {}
+    source: |
+      kernel void entry(global int *data, global int *output)
+      {
+      int i = get_global_id(0);
+      data[i] = i;
+      barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
+      if (get_local_id(0) == 0)
+      {
+      int x = 0;
+      for (int l = 0; l < 4; l++)
+      {
+      x += data[l];
+      }
+      output[0] = x;
+      }
+      }
+
+  - name: private_unaligned_out_of_bounds
+    entry: entry
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 16 }
+    expected:
+      invalid_access: 1
+      misaligned: 1
+    source: |
+      kernel void entry(global int *data)
+      {
+      volatile int scratch[4];
+      int i = get_global_id(0);
+      scratch[i] = i;
+      volatile private char *bytes = (volatile private char *)scratch + 4 * i + 18;
+      data[i] = *(volatile private int *)bytes;
+      }
+
+  - name: atomic_on_write_only_buffer
+    entry: entry
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 16, access: wo }
+    expected:
+      access_flags: 1
+    source: |
+      kernel void entry(global int *data)
+      {
+      atomic_inc(data);
+      }
+
+  - name: atomic_on_read_only_buffer
+    entry: entry
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 16, access: ro }
+    expected:
+      access_flags: 1
+    source: |
+      kernel void entry(global int *data)
+      {
+      atomic_inc(data);
+      }
+
+  - name: read_write_buffer_permitted
+    entry: entry
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 16 }
+      - { buffer: 16 }
+    expected: {}
+    source: |
+      kernel void entry(global int *in, global int *out)
+      {
+      out[0] = in[0];
+      atomic_inc(out);
+      }
+
+  - name: constant_pointer_spill
+    entry: entry
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16 }
+    expected: {}
+    source: |
+      __constant int table[4] = {10, 20, 30, 40};
+      kernel void entry(global int *out)
+      {
+      int i = get_global_id(0);
+      __constant int *p = table + i;
+      out[i] = *p;
+      }
+

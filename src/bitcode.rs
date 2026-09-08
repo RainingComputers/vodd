@@ -145,6 +145,7 @@ pub enum Builtin {
     NumWorkgroups,
     WorkgroupSize,
     GlobalOffset,
+    GlobalSize,
 }
 
 impl Builtin {
@@ -155,6 +156,7 @@ impl Builtin {
             26 => Builtin::WorkgroupId,
             27 => Builtin::LocalInvocationId,
             28 => Builtin::GlobalInvocationId,
+            31 => Builtin::GlobalSize,
             33 => Builtin::GlobalOffset,
             other => return Err(Error::UnsupportedBuiltin(other)),
         })
@@ -410,6 +412,11 @@ pub enum Instruction {
         object: Id,
         alignment: Option<u32>,
     },
+    CopyMemory {
+        target: Id,
+        source: Id,
+        size: Option<Id>,
+    },
     AccessChain {
         result: Id,
         result_type: Id,
@@ -557,6 +564,67 @@ pub struct Location {
     pub column: u32,
 }
 
+impl Instruction {
+    pub fn operands(&self) -> Vec<Id> {
+        match self {
+            Instruction::Undef { .. }
+            | Instruction::Nop
+            | Instruction::Return
+            | Instruction::Unreachable
+            | Instruction::Barrier { .. }
+            | Instruction::MemoryBarrier { .. } => Vec::new(),
+            Instruction::Variable { initializer, .. } => initializer.iter().copied().collect(),
+            Instruction::Load { pointer, .. } => vec![*pointer],
+            Instruction::Store { pointer, object, .. } => vec![*pointer, *object],
+            Instruction::CopyMemory { target, source, size } => {
+                let mut operands = vec![*target, *source];
+                operands.extend(size);
+                operands
+            }
+            Instruction::AccessChain { base, indices, .. } => {
+                let mut operands = vec![*base];
+                operands.extend(indices);
+                operands
+            }
+            Instruction::Unary { operand, .. }
+            | Instruction::Convert { operand, .. }
+            | Instruction::CopyObject { operand, .. } => vec![*operand],
+            Instruction::Binary { lhs, rhs, .. } | Instruction::Dot { lhs, rhs, .. } => {
+                vec![*lhs, *rhs]
+            }
+            Instruction::Select { condition, true_value, false_value, .. } => {
+                vec![*condition, *true_value, *false_value]
+            }
+            Instruction::CompositeConstruct { members, .. } => members.clone(),
+            Instruction::CompositeExtract { composite, .. } => vec![*composite],
+            Instruction::CompositeInsert { object, composite, .. } => vec![*object, *composite],
+            Instruction::VectorShuffle { first, second, .. } => vec![*first, *second],
+            Instruction::VectorExtractDynamic { vector, index, .. } => vec![*vector, *index],
+            Instruction::VectorInsertDynamic { vector, component, index, .. } => {
+                vec![*vector, *component, *index]
+            }
+            Instruction::VectorTimesScalar { vector, scalar, .. } => vec![*vector, *scalar],
+            Instruction::ExtInst { operands, .. } => operands.clone(),
+            Instruction::Atomic { pointer, value, comparator, .. } => {
+                let mut operands = vec![*pointer];
+                operands.extend(value);
+                operands.extend(comparator);
+                operands
+            }
+            Instruction::Phi { pairs, .. } => pairs.iter().map(|(value, _)| *value).collect(),
+            Instruction::FunctionCall { function, arguments, .. } => {
+                let mut operands = vec![*function];
+                operands.extend(arguments);
+                operands
+            }
+            Instruction::Branch { .. }
+            | Instruction::BranchConditional { .. }
+            | Instruction::Switch { .. } => Vec::new(),
+            Instruction::ReturnValue { value } => vec![*value],
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Block {
     pub label: Id,
@@ -702,6 +770,40 @@ impl Module {
         }
 
         Err(Error::NoSuchEntryPoint)
+    }
+
+    pub fn referenced_from(&self, entry: Id) -> Vec<bool> {
+        let mut named = vec![false; self.bound()];
+        let mut walked = vec![false; self.bound()];
+        let mut pending = vec![entry];
+
+        while let Some(function) = pending.pop() {
+            let Some(seen) = walked.get_mut(function as usize) else {
+                continue;
+            };
+
+            if core::mem::replace(seen, true) {
+                continue;
+            }
+
+            let Ok(body) = self.function(function) else {
+                continue;
+            };
+
+            for instruction in body.blocks.iter().flat_map(|block| &block.instructions) {
+                if let Instruction::FunctionCall { function, .. } = instruction {
+                    pending.push(*function);
+                }
+
+                for operand in instruction.operands() {
+                    if let Some(mentioned) = named.get_mut(operand as usize) {
+                        *mentioned = true;
+                    }
+                }
+            }
+        }
+
+        named
     }
 
     pub fn scalar_width(&self, type_id: Id) -> Result<u32, Error> {

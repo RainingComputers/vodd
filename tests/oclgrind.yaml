@@ -1,0 +1,1638 @@
+metadata:
+  origin:
+    project: Oclgrind
+    path: ../Oclgrind/tests/kernels
+
+cases:
+  - name: packed
+    origin: alignment/packed
+    entry: packed
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { value: [1, 2, 0, 0, 2], elem: char }
+      - { buffer: 4 }
+    expected: {}
+    oclgrind_errors: 0
+    source: |
+      struct __attribute__((packed)) Foo
+      {
+        char a;
+        int b;
+      };
+      
+      kernel void packed(struct Foo x, global int *out)
+      {
+        *out = x.b;
+      }
+
+  - name: unaligned
+    origin: alignment/unaligned
+    entry: unaligned
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 8, fill: 42 }
+      - { buffer: 4 }
+    expected:
+      misaligned: 1
+    oclgrind_errors: 1
+    source: |
+      kernel void unaligned(global int *in, global int *out)
+      {
+        global char *char_ptr = (global char*)in + 2;
+        global int *address   = (global int*)char_ptr;
+        *out = *address;
+      }
+
+  - name: atomic_cmpxchg_false_race
+    origin: atomics/atomic_cmpxchg_false_race
+    entry: atomic_cmpxchg_false_race
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 20 }
+      - { local: 4 }
+    expected: {}
+    oclgrind_errors: 0
+    source: |
+      kernel void atomic_cmpxchg_false_race(global int *data, local int *scratch)
+      {
+        int l = get_local_id(0);
+        if (l == 0)
+        {
+          scratch[0] = 0;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+      
+        bool done = false;
+        int before, old;
+        int result;
+        for (int i = 0; i < get_local_size(0); i++)
+        {
+          barrier(CLK_LOCAL_MEM_FENCE);
+          before = scratch[0];
+          barrier(CLK_LOCAL_MEM_FENCE);
+      
+          if (!done)
+          {
+            old = atomic_cmpxchg(scratch, before, before+1);
+            if (old == before)
+            {
+              done = true;
+              result = scratch[0];
+            }
+          }
+        }
+      
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (l == 0)
+        {
+          *data = *scratch;
+        }
+        data[l+1] = result;
+      }
+
+  - name: atomic_cmpxchg_read_race
+    origin: atomics/atomic_cmpxchg_read_race
+    entry: atomic_cmpxchg_read_race
+    global_size: [2, 1, 1]
+    local_size: [2, 1, 1]
+    arguments:
+      - { buffer: 4, data: [-1] }
+    expected:
+      data_race: 2
+    oclgrind_errors: 2
+    source: |
+      kernel void atomic_cmpxchg_read_race(global int *data)
+      {
+        int i = get_global_id(0);
+        if (i == 0)
+        {
+          *data = 0;
+        }
+        else
+        {
+          atomic_cmpxchg(data, 0, 0x01000001);
+        }
+      }
+
+  - name: atomic_cmpxchg_write_race
+    origin: atomics/atomic_cmpxchg_write_race
+    entry: atomic_cmpxchg_write_race
+    global_size: [2, 1, 1]
+    local_size: [2, 1, 1]
+    arguments:
+      - { buffer: 4, data: [-1] }
+    expected:
+      data_race: 1
+    oclgrind_errors: 1
+    source: |
+      kernel void atomic_cmpxchg_write_race(global int *data)
+      {
+        int i = get_global_id(0);
+        if (i == 0)
+        {
+          *data = 0;
+        }
+        atomic_cmpxchg(data, i, 42);
+      }
+
+  - name: atomic_global_fence
+    origin: atomics/atomic_global_fence
+    entry: atomic_global_fence
+    global_size: [8, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 8 }
+      - { buffer: 8, fill: -1 }
+    expected: {}
+    oclgrind_errors: 0
+    source: |
+      kernel void atomic_global_fence(global int *data, global int *scratch)
+      {
+        int i = get_global_id(0);
+        int l = get_local_id(0);
+        int g = get_group_id(0);
+        if (l == 0)
+        {
+          scratch[g] = 0;
+        }
+        barrier(CLK_GLOBAL_MEM_FENCE);
+        atomic_add(scratch+g, i);
+        barrier(CLK_GLOBAL_MEM_FENCE);
+        if (l == 0)
+        {
+          data[g] = scratch[g];
+        }
+      }
+
+  - name: atomic_global_fence_race
+    origin: atomics/atomic_global_fence_race
+    entry: atomic_global_fence_race
+    global_size: [8, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 8 }
+      - { buffer: 4 }
+    expected:
+      data_race: 2
+    oclgrind_errors: 2
+    source: |
+      kernel void atomic_global_fence_race(global int *data, global int *scratch)
+      {
+        int i = get_global_id(0);
+        int l = get_local_id(0);
+        int g = get_group_id(0);
+        atomic_add(scratch, i);
+        barrier(CLK_GLOBAL_MEM_FENCE);
+        if (l == 0)
+        {
+          data[g] = *scratch;
+        }
+      }
+
+  - name: atomic_increment
+    origin: atomics/atomic_increment
+    entry: atomic_increment
+    global_size: [4, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 4 }
+    expected: {}
+    oclgrind_errors: 0
+    source: |
+      kernel void atomic_increment(global int *data)
+      {
+        atomic_inc(data);
+      }
+
+  - name: atomic_intergroup_race
+    origin: atomics/atomic_intergroup_race
+    entry: atomic_intergroup_race
+    global_size: [8, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 4, fill: -1 }
+    expected:
+      data_race: 2
+    oclgrind_errors: 2
+    source: |
+      kernel void atomic_intergroup_race(global int *data)
+      {
+        int i = get_global_id(0);
+        if (i == 0)
+        {
+          *data = 0;
+        }
+        barrier(CLK_GLOBAL_MEM_FENCE);
+        atomic_inc(data);
+      }
+
+  - name: atomic_local_fence
+    origin: atomics/atomic_local_fence
+    entry: atomic_local_fence
+    global_size: [8, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 8 }
+      - { local: 4 }
+    expected: {}
+    oclgrind_errors: 0
+    source: |
+      kernel void atomic_local_fence(global int *data, local int *scratch)
+      {
+        int i = get_global_id(0);
+        int l = get_local_id(0);
+        int g = get_group_id(0);
+        if (l == 0)
+        {
+          *scratch = 0;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+        atomic_add(scratch, i);
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (l == 0)
+        {
+          data[g] = *scratch;
+        }
+      }
+
+  - name: atomic_race_after
+    origin: atomics/atomic_race_after
+    entry: atomic_race_after
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 4 }
+      - { buffer: 4 }
+    expected:
+      data_race: 1
+    oclgrind_errors: 1
+    source: |
+      kernel void atomic_race_after(global int *data, global int *output)
+      {
+        atomic_inc(data);
+        if (get_global_id(0) == get_global_size(0)-1)
+        {
+          *output = *data;
+        }
+      }
+
+  - name: atomic_race_before
+    origin: atomics/atomic_race_before
+    entry: atomic_race_before
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 4 }
+    expected:
+      data_race: 6
+    oclgrind_errors: 6
+    source: |
+      kernel void atomic_race_before(global int *data)
+      {
+        if (get_global_id(0) == 0)
+        {
+          *data = 0;
+        }
+        atomic_dec(data);
+      }
+
+  - name: atomic_same_workitem
+    origin: atomics/atomic_same_workitem
+    entry: atomic_same_workitem
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16 }
+    expected: {}
+    oclgrind_errors: 0
+    source: |
+      kernel void atomic_same_workitem(global int *data)
+      {
+        int i = get_global_id(0);
+        if ((i % 2) == 0)
+        {
+          data[i] = 0;
+          atomic_inc(data+i);
+        }
+        else
+        {
+          atomic_inc(data+i);
+          data[i] = data[i] + 1;
+        }
+      }
+
+  - name: barrier_different_instructions
+    origin: barrier/barrier_different_instructions
+    entry: barrier_different_instructions
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16 }
+    expected:
+      barrier_divergence: 3
+    oclgrind_errors: 3
+    source: |
+      kernel void barrier_different_instructions(global int *data)
+      {
+        int i = get_global_id(0);
+        if (i == 0)
+        {
+          data[0] = 42;
+          barrier(CLK_GLOBAL_MEM_FENCE);
+        }
+        else
+        {
+          barrier(CLK_GLOBAL_MEM_FENCE);
+          data[i] = i + data[0];
+        }
+      }
+
+  - name: barrier_divergence
+    origin: barrier/barrier_divergence
+    entry: barrier_divergence
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16 }
+    expected:
+      barrier_participation: 1
+    oclgrind_errors: 1
+    source: |
+      kernel void barrier_divergence(global int *data)
+      {
+        int i = get_global_id(0);
+        if (i != 0)
+        {
+          barrier(CLK_GLOBAL_MEM_FENCE);
+        }
+        data[i] = i;
+      }
+
+  - name: null_argument
+    origin: bugs/null_argument
+    entry: null_argument
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 8 }
+    expected: {}
+    oclgrind_errors: 0
+    source: |
+      ulong func_1(ulong * p_1)
+      {
+        return 1;
+      }
+      
+      kernel void null_argument(global ulong *output)
+      {
+        *output = func_1((void*)0);
+      }
+
+  - name: restrict
+    origin: bugs/restrict
+    entry: reduce
+    global_size: [64, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { value: [256], elem: uint }
+      - { buffer: 1024, range: [0, 1, 255] }
+      - { buffer: 64 }
+      - { local: 16 }
+    expected: {}
+    oclgrind_errors: 0
+    source: |
+      kernel void reduce(uint n,
+                         global uint * restrict data,
+                         global uint * restrict result,
+                         local uint * restrict localData)
+      {
+        uint gid = get_global_id(0);
+        uint lid = get_local_id(0);
+        uint gsz = get_global_size(0);
+        uint lsz = get_local_size(0);
+        uint grp = get_group_id(0);
+      
+        uint sum = 0;
+        for (uint i = gid; i < n; i+=gsz)
+        {
+          sum += data[i];
+        }
+      
+        localData[lid] = sum;
+        for (uint offset = lsz/2; offset > 0; offset/=2)
+        {
+          barrier(CLK_LOCAL_MEM_FENCE);
+          if (lid < offset)
+          {
+            localData[lid] += localData[lid + offset];
+          }
+        }
+      
+        if (lid == 0)
+        {
+          result[grp] = localData[lid];
+        }
+      }
+
+  - name: write_vector_write_only_fp
+    origin: bugs/write_vector_write_only_fp
+    skip: "DIVERGENCE: at -O0 the SPIR-V translator lowers a partial vector store as
+      OpLoad + OpCompositeInsert + OpStore, so vodd sees a genuine read of a write-only
+      buffer and reports 4 access_flags. Oclgrind interprets LLVM IR, one step earlier,
+      where clang emits a scalar element store with no load. Passes at -O2, where the
+      translator elides the load. Not a detector defect - suppressing it needs dataflow
+      to prove the loaded value is written back unchanged. Measured blast radius: only
+      partial vector stores are affected (scalar, char, full-vector and struct-field
+      stores to a write-only buffer are all silent), and the phantom load also inflates
+      mapped_region counts and can manufacture data_race on benign uniform partial
+      vector writes"
+    entry: write_vector_write_only_fp
+    global_size: [4, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 64, access: wo, fill: 7 }
+    expected: {}
+    oclgrind_errors: 0
+    source: |
+      kernel void write_vector_write_only_fp(global int4 *output)
+      {
+        int i = get_global_id(0);
+        output[i].x = 42;
+      }
+
+  - name: broadcast
+    origin: data-race/broadcast
+    entry: broadcast
+    global_size: [4, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 4, data: [42] }
+      - { buffer: 16 }
+    expected: {}
+    oclgrind_errors: 0
+    source: |
+      kernel void broadcast(global int *value, global int *output)
+      {
+        int i = get_global_id(0);
+        output[i] = value[0];
+      }
+
+  - name: global_fence
+    origin: data-race/global_fence
+    entry: global_fence
+    global_size: [16, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 64 }
+      - { buffer: 16 }
+    expected: {}
+    oclgrind_errors: 0
+    source: |
+      kernel void global_fence(global int *scratch, global int *output)
+      {
+        int i = get_global_id(0);
+        int g = get_group_id(0);
+        scratch[i] = i;
+        barrier(CLK_GLOBAL_MEM_FENCE);
+        if (get_local_id(0) == 0)
+        {
+          int x = 0;
+          for (int l = 0; l < get_local_size(0); l++)
+          {
+            x += scratch[get_local_size(0)*g + l];
+          }
+          output[g] = x;
+        }
+      }
+
+  - name: global_only_fence
+    origin: data-race/global_only_fence
+    entry: global_only_fence
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { local: 16 }
+      - { buffer: 16 }
+    expected:
+      data_race: 3
+    oclgrind_errors: 3
+    source: |
+      kernel void global_only_fence(local int *scratch, global int *output)
+      {
+        int l = get_local_id(0);
+        int g = get_group_id(0);
+        scratch[l] = l;
+        barrier(CLK_GLOBAL_MEM_FENCE);
+        if (get_local_id(0) == 0)
+        {
+          int x = 0;
+          for (int i = 0; i < get_local_size(0); i++)
+          {
+            x += scratch[i];
+          }
+          output[g] = x;
+        }
+      }
+
+  - name: global_read_write_race
+    origin: data-race/global_read_write_race
+    entry: global_read_write_race
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16, range: [0, 1, 3] }
+    expected:
+      data_race: 2
+    oclgrind_errors: 2
+    source: |
+      kernel void global_read_write_race(global int *data)
+      {
+        int i = get_global_id(0);
+        if (i > 0)
+        {
+          data[i] = data[i-1];
+        }
+      }
+
+  - name: global_write_write_race
+    origin: data-race/global_write_write_race
+    entry: global_write_write_race
+    global_size: [4, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 4 }
+    expected:
+      data_race: 3
+    oclgrind_errors: 3
+    source: |
+      kernel void global_write_write_race(global int *data)
+      {
+        data[0] = get_global_id(0);
+      }
+
+  - name: increment
+    origin: data-race/increment
+    entry: increment
+    global_size: [4, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 16, range: [0, 1, 3] }
+    expected: {}
+    oclgrind_errors: 0
+    source: |
+      kernel void increment(global int *data)
+      {
+        int i = get_global_id(0);
+        data[i]  = data[i] + 1;
+      }
+
+  - name: intergroup_hidden_race
+    origin: data-race/intergroup_hidden_race
+    entry: intergroup_hidden_race
+    global_size: [2, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 4 }
+      - { buffer: 8 }
+    expected:
+      data_race: 1
+    oclgrind_errors: 1
+    source: |
+      kernel void intergroup_hidden_race(global int *data, global int *output)
+      {
+        int group = get_group_id(0);
+        output[group] = data[0];
+        if (group == 1)
+        {
+          data[0] = group;
+        }
+      }
+
+  - name: intergroup_race
+    origin: data-race/intergroup_race
+    entry: intergroup_race
+    global_size: [8, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 8 }
+    expected:
+      data_race: 1
+    oclgrind_errors: 1
+    source: |
+      kernel void intergroup_race(global int *data)
+      {
+        int g = get_group_id(0);
+        if (get_local_id(0) == 0)
+        {
+          data[g] = g;
+        }
+        barrier(CLK_GLOBAL_MEM_FENCE);
+        if (get_global_id(0) == 0)
+        {
+          int x = 0;
+          for (int i = 0; i < get_num_groups(0); i++)
+          {
+            x += data[i];
+          }
+          data[0] = x;
+        }
+        barrier(CLK_GLOBAL_MEM_FENCE);
+      }
+
+  - name: intragroup_hidden_race
+    origin: data-race/intragroup_hidden_race
+    entry: intragroup_hidden_race
+    global_size: [2, 1, 1]
+    local_size: [2, 1, 1]
+    arguments:
+      - { buffer: 4, fill: 42 }
+      - { buffer: 8 }
+    expected:
+      data_race: 1
+    oclgrind_errors: 1
+    source: |
+      kernel void intragroup_hidden_race(global int *data, global int *output)
+      {
+        int id = get_local_id(0);
+        output[id] = data[0];
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (id == 0)
+        {
+          data[0] = -1;
+        }
+      }
+
+  - name: local_only_fence
+    origin: data-race/local_only_fence
+    entry: local_only_fence
+    global_size: [16, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 64 }
+      - { buffer: 16 }
+    expected:
+      data_race: 12
+    oclgrind_errors: 12
+    source: |
+      kernel void local_only_fence(global int *scratch, global int *output)
+      {
+        int i = get_global_id(0);
+        int g = get_group_id(0);
+        scratch[i] = i;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (get_local_id(0) == 0)
+        {
+          int x = 0;
+          for (int l = 0; l < get_local_size(0); l++)
+          {
+            x += scratch[get_local_size(0)*g + l];
+          }
+          output[g] = x;
+        }
+      }
+
+  - name: local_read_write_race
+    origin: data-race/local_read_write_race
+    entry: local_read_write_race
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 4 }
+      - { local: 16 }
+    expected:
+      data_race: 3
+    oclgrind_errors: 3
+    source: |
+      kernel void local_read_write_race(global int *data, local int *scratch)
+      {
+        int l = get_local_id(0);
+        scratch[l] = 0;
+        barrier(CLK_LOCAL_MEM_FENCE);
+      
+        scratch[l] = l;
+        if (l == 0)
+        {
+          int x = 0;
+          for (int i = 0; i < get_local_size(0); i++)
+          {
+            x += scratch[i];
+          }
+          *data = x;
+        }
+      }
+
+  - name: local_write_write_race
+    origin: data-race/local_write_write_race
+    entry: local_write_write_race
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16 }
+      - { local: 4 }
+    expected:
+      data_race: 3
+    oclgrind_errors: 3
+    source: |
+      kernel void local_write_write_race(global int *data, local int *scratch)
+      {
+        int i = get_global_id(0);
+        *scratch = i;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        data[i] = *scratch;
+      }
+
+  - name: uniform_write_race
+    origin: data-race/uniform_write_race
+    entry: uniform_write_race
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 4, fill: -1 }
+    expected: {}
+    oclgrind_errors: 0
+    source: |
+      kernel void uniform_write_race(global int *data)
+      {
+        *data = 0;
+      }
+
+  - name: atomic_out_of_bounds
+    origin: memcheck/atomic_out_of_bounds
+    entry: atomic_out_of_bounds
+    global_size: [5, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 16 }
+    expected:
+      invalid_access: 1
+    oclgrind_errors: 3
+    source: |
+      kernel void atomic_out_of_bounds(global int *counters)
+      {
+        int i = get_global_id(0);
+        atomic_inc(counters+i);
+      }
+
+  - name: casted_static_array
+    origin: memcheck/casted_static_array
+    entry: casted_static_array
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 8 }
+    expected:
+      array_index: 4
+    oclgrind_errors: 4
+    source: |
+      void transparent_crc_no_string(ulong *p1, ulong p2) { *p1 += p2; }
+      int get_linear_global_id() {
+        return (get_global_id(2) * get_global_size(1) + get_global_id(1)) *
+                   get_global_size(0) +
+               get_global_id(0);
+      }
+      union U5 {
+        short f0;
+        int f3;
+      };
+      struct S6 {
+        union U5 g_75[5][7][2];
+        union U5 **g_91[78];
+      };
+      __kernel void casted_static_array(__global ulong *p1) {
+        int i, j, k;
+        struct S6 c_864;
+        struct S6 *p_863 = &c_864;
+        union U5 *p_863_6;
+        struct S6 c_865 = {{{{{0xD54EL}}}}, {&p_863_6}};
+        c_864 = c_865;
+        ulong crc64_context = i = 0;
+        for (; i < 9; i++) {
+          j = 0;
+          {
+            k = 0;
+            { transparent_crc_no_string(&crc64_context, p_863->g_75[i][j][k].f0); }
+          }
+        }
+        p1[get_linear_global_id()] = crc64_context;
+      }
+
+  - name: dereference_null
+    origin: memcheck/dereference_null
+    entry: dereference_null
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { nullptr: true }
+      - { buffer: 4 }
+    expected:
+      invalid_access: 1
+    oclgrind_errors: 2
+    source: |
+      kernel void dereference_null(global int *input, global int *output)
+      {
+        output[0] *= input[0];
+      }
+
+  - name: fake_out_of_bounds
+    origin: memcheck/fake_out_of_bounds
+    entry: entry
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 8 }
+    expected: {}
+    oclgrind_errors: 0
+    source: |
+      struct S0 {
+          uchar f[1];
+          ulong g[4];
+      };
+      
+      __kernel void entry(__global ulong *result) {
+          struct S0 s = {{1}, {2,3,4,5}};
+          struct S0 t = s;
+      
+          volatile int i = 0;
+          *result = t.g[i];
+      }
+
+  - name: read_out_of_bounds
+    origin: memcheck/read_out_of_bounds
+    entry: read_out_of_bounds
+    global_size: [5, 1, 1]
+    local_size: [5, 1, 1]
+    arguments:
+      - { buffer: 16, range: [0, 1, 3] }
+      - { buffer: 16, range: [0, 1, 3] }
+      - { buffer: 20 }
+    expected:
+      invalid_access: 2
+    oclgrind_errors: 3
+    source: |
+      kernel void read_out_of_bounds(global int *a, global int *b, global int *c)
+      {
+        int i = get_global_id(0);
+        if (i < 4)
+        {
+          c[i] = a[i] + b[i];
+        }
+        else
+        {
+          c[i] = a[0] * (a[i] + b[i]);
+        }
+      }
+
+  - name: read_write_only_memory
+    origin: memcheck/read_write_only_memory
+    entry: read_write_only_memory
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16, access: ro, range: [0, 1, 3] }
+      - { buffer: 16, access: wo }
+    expected:
+      access_flags: 4
+    oclgrind_errors: 4
+    source: |
+      kernel void read_write_only_memory(global int *input, global int *output)
+      {
+        int i = get_global_id(0);
+        output[i] += input[i];
+      }
+
+  - name: static_array
+    origin: memcheck/static_array
+    entry: static_array
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 4 }
+    expected:
+      array_index: 4
+    oclgrind_errors: 4
+    source: |
+      struct S
+      {
+        int a;
+        char b[2];
+      };
+      
+      kernel void static_array(global char *output)
+      {
+        volatile struct S s = {-1, {42, 7}};
+        int i = get_global_id(0);
+        s.b[i] = i;
+        output[i] = s.b[i];
+      }
+
+  - name: static_array_padded_struct
+    origin: memcheck/static_array_padded_struct
+    entry: static_array_padded_struct
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 4 }
+    expected:
+      array_index: 2
+    oclgrind_errors: 2
+    source: |
+      struct S
+      {
+        int a;
+        char b[2];
+      };
+      
+      kernel void static_array_padded_struct(global char *output)
+      {
+        struct S s = {-1, {42, 7}};
+        int i = get_global_id(0);
+        output[i] = s.b[i];
+      }
+
+  - name: write_out_of_bounds
+    origin: memcheck/write_out_of_bounds
+    entry: write_out_of_bounds
+    global_size: [5, 1, 1]
+    local_size: [5, 1, 1]
+    arguments:
+      - { buffer: 20, range: [0, 1, 4] }
+      - { buffer: 20, range: [0, 1, 4] }
+      - { buffer: 16 }
+    expected:
+      invalid_access: 1
+    oclgrind_errors: 1
+    source: |
+      kernel void write_out_of_bounds(global int *a, global int *b, global int *c)
+      {
+        int i = get_global_id(0);
+        c[i] = a[i] + b[i];
+      }
+
+  - name: write_read_only_memory
+    origin: memcheck/write_read_only_memory
+    entry: write_read_only_memory
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 16, access: ro, range: [0, 1, 3] }
+      - { buffer: 16 }
+    expected:
+      access_flags: 4
+    oclgrind_errors: 4
+    source: |
+      kernel void write_read_only_memory(global int *input, global int *output)
+      {
+        int i = get_global_id(0);
+        output[i] = input[i]++;
+      }
+
+  - name: non_uniform_work_groups
+    origin: misc/non_uniform_work_groups
+    entry: non_uniform_work_groups
+    global_size: [3, 3, 3]
+    local_size: [2, 2, 2]
+    skip: "requires -cl-std=CL2.0 for non-uniform work groups; vodd is OpenCL 1.2"
+    arguments:
+      - { buffer: 132 }
+    expected: {}
+    oclgrind_errors: 0
+    source: |
+      kernel void non_uniform_work_groups(global int *output)
+      {
+        int i = get_global_linear_id();
+        output[i] = get_local_linear_id();
+      
+        int end = get_global_size(0) * get_global_size(1) * get_global_size(2);
+        if (i == end-1)
+        {
+          output[end]   = get_local_size(0);
+          output[end+1] = get_local_size(1);
+          output[end+2] = get_local_size(2);
+          output[end+3] = get_enqueued_local_size(0);
+          output[end+4] = get_enqueued_local_size(1);
+          output[end+5] = get_enqueued_local_size(2);
+        }
+      }
+
+  - name: reduce
+    origin: misc/reduce
+    entry: reduce
+    global_size: [64, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { value: [256], elem: uint }
+      - { buffer: 1024, range: [0, 1, 255] }
+      - { buffer: 64 }
+      - { local: 16 }
+    expected: {}
+    oclgrind_errors: 0
+    source: |
+      kernel void reduce(uint n,
+                         global uint *data,
+                         global uint *result,
+                         local uint *localData)
+      {
+        uint gid = get_global_id(0);
+        uint lid = get_local_id(0);
+        uint gsz = get_global_size(0);
+        uint lsz = get_local_size(0);
+        uint grp = get_group_id(0);
+      
+        uint sum = 0;
+        for (uint i = gid; i < n; i+=gsz)
+        {
+          sum += data[i];
+        }
+      
+        localData[lid] = sum;
+        for (uint offset = lsz/2; offset > 0; offset/=2)
+        {
+          barrier(CLK_LOCAL_MEM_FENCE);
+          if (lid < offset)
+          {
+            localData[lid] += localData[lid + offset];
+          }
+        }
+      
+        if (lid == 0)
+        {
+          result[grp] = localData[lid];
+        }
+      }
+
+  - name: llvm_memcpyopt_bug
+    origin: bugs/llvm_memcpyopt_bug
+    entry: llvm_memcpyopt_bug
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 12 }
+    expected: {}
+    source: |
+      typedef struct {
+        int a;
+        int b;
+        int c;
+      } S;
+      
+      S foo(S a) {
+        return a;
+      }
+      
+      kernel void llvm_memcpyopt_bug(global S *out)
+      {
+        S a = {7,7,7};
+        out[0] = foo(a);
+      }
+
+  - name: sroa_addrspace_cast
+    origin: bugs/sroa_addrspace_cast
+    entry: sroa_addrspace_cast
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 4, fill: 42 }
+      - { buffer: 4 }
+    expected: {}
+    source: |
+      typedef struct
+      {
+        float x;
+      } DataStruct;
+      
+      __kernel void sroa_addrspace_cast(__global DataStruct *input,
+                                        __global float *output)
+      {
+        size_t i = get_global_id(0);
+        DataStruct s = input[i];
+        output[i] = s.x;
+      }
+
+  - name: many_alloca
+    origin: bugs/many_alloca
+    entry: many_alloca
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 4 }
+      - { value: [100000], elem: uint }
+    expected: {}
+    source: |
+      void bar(int *x)
+      {
+        *x += 1;
+      }
+      
+      int foo()
+      {
+        int x = 0;
+        bar(&x);
+        return x;
+      }
+      
+      kernel void many_alloca(global int *data, int n)
+      {
+        int x = 0;
+        for (int i = 0; i < n; i++)
+        {
+          x += foo();
+        }
+        data[get_global_id(0)] = x;
+      }
+
+  - name: const_gep_expr_pointee_type
+    origin: bugs/const_gep_expr_pointee_type
+    entry: entry
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    expected: {}
+    source: |
+      #pragma clang diagnostic ignored "-Wunused-value"
+      
+      struct S0 {
+        int d;
+        long b;
+      } fn1() {
+        struct S0 a = {3};
+        a.d;
+        return a;
+        }
+      __kernel void entry() { fn1(); }
+
+  - name: multidim_array_in_struct
+    origin: bugs/multidim_array_in_struct
+    entry: multidim_array_in_struct
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 8 }
+    expected: {}
+    source: |
+      //
+      // Issue #64 on GitHub:
+      // https://github.com/jrprice/Oclgrind/issues/64
+      //
+      // Required alignment for multi-dimensional arrays was incorrect.
+      //
+      
+      struct S0
+      {
+        uchar a;
+        ulong b[2][3][1];
+      };
+      
+      kernel void multidim_array_in_struct(global ulong *output)
+      {
+        struct S0 s =
+        {
+          1UL,
+          {
+            {
+              {1L},
+              {1L},
+              {1L}
+            },
+            {
+              {1L},
+              {1L},
+              {1L}
+            }
+          },
+        };
+      
+        ulong c = 0UL;
+        for (int i = 0; i < 2; i++)
+          for (int j = 0; j < 3; j++)
+            for (int k = 0; k < 1; k++)
+              c += s.b[i][j][k];
+      
+        *output = c;
+      }
+
+  - name: byval_function_argument
+    origin: bugs/byval_function_argument
+    entry: byval_function_argument
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 8 }
+    expected: {}
+    source: |
+      union U
+      {
+        uint a;
+        uint b;
+      };
+      
+      uint func(union U value)
+      {
+        uint ret = value.a;
+        value.b = 777;
+        return ret;
+      }
+      
+      kernel void byval_function_argument(global uint *output)
+      {
+        union U u = {42};
+        output[0] = func(u);
+        output[1] = u.b;
+      }
+
+  - name: kernel_struct_argument
+    origin: bugs/kernel_struct_argument
+    entry: kernel_struct_argument
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { value: [42, 3, 18], elem: float }
+      - { buffer: 4 }
+    expected: {}
+    source: |
+      typedef struct
+      {
+        float a;
+        float b;
+        float c;
+      } Structure;
+      
+      kernel void kernel_struct_argument(Structure x, global float *out)
+      {
+        *out = x.a * x.b + x.c;
+      }
+
+  - name: llvm_bswap
+    origin: bugs/llvm_bswap
+    entry: test
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 16, data: [1, 268435456, 305419896, 304297029] }
+      - { buffer: 16 }
+    expected: {}
+    source: |
+      kernel void test(global uint *input, global uint *output)
+      {
+        for (unsigned int i = 0; i < 4; i++)
+        {
+          uint word = input[i];
+          output[i] = ((word & 0xff) << 24) | ((word & 0xff00) << 8) | ((word & 0xff0000) >> 8) | ((word & 0xff000000) >> 24);
+        }
+      }
+
+  - name: gvn_arbitrary_integers
+    origin: bugs/gvn_arbitrary_integers
+    entry: gvn_arbitrary_integers
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 4, fill: 42 }
+      - { buffer: 12 }
+    expected: {}
+    source: |
+      __kernel void gvn_arbitrary_integers(__global int *source,
+                                           __global int *dest)
+      {
+        size_t i = get_global_id(0);
+        int3 tmp = 0;
+        tmp.S2 = source[i];
+        vstore3(tmp, 0, dest);
+      }
+
+  - name: rhadd_overflow
+    origin: bugs/rhadd_overflow
+    entry: rhadd_overflow
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 8 }
+    expected: {}
+    source: |
+      kernel void rhadd_overflow(global ulong *output)
+      {
+        output[0] = rhadd(0UL, 0xFFFFFFFFFFFFFFFFUL);
+      }
+
+  - name: array
+    origin: misc/array
+    entry: array
+    global_size: [8, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 1024 }
+    expected: {}
+    source: |
+      kernel void array(global long16 *output)
+      {
+        long16 data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+      
+        int i = get_global_id(0);
+      
+        long16 *foo = data;
+      
+        output[i] = foo[i];
+      }
+
+  - name: lvalue_loads
+    origin: misc/lvalue_loads
+    skip: "DIVERGENCE: same partial-vector-store lowering as write_vector_write_only_fp;
+      output[i].z and .zy become OpLoad + OpCompositeInsert + OpStore at -O0, so vodd
+      reports 3 access_flags on the write-only arguments"
+    entry: lvalue_loads
+    global_size: [1, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 16, range: [16, 1, 19] }
+      - { buffer: 16, access: wo, range: [1, 1, 4] }
+      - { buffer: 16, access: wo, range: [1, 1, 4] }
+      - { buffer: 16, access: wo, range: [1, 1, 4] }
+      - { buffer: 16, range: [1, 1, 4] }
+      - { buffer: 16, range: [1, 1, 4] }
+      - { buffer: 16, range: [1, 1, 4] }
+      - { buffer: 16, access: wo, range: [1, 1, 4] }
+      - { buffer: 16, access: wo, range: [1, 1, 4] }
+      - { buffer: 32, range: [1, 1, 8] }
+      - { buffer: 16, range: [16, 1, 19] }
+      - { buffer: 16, access: wo, range: [1, 1, 4] }
+      - { buffer: 16, range: [1, 1, 4] }
+      - { buffer: 16, access: wo, range: [1, 1, 4] }
+      - { buffer: 4 }
+    expected: {}
+    source: |
+      typedef struct
+      {
+        char  a;
+        int   b;
+        int   c;
+        char  d;
+      } S;
+      
+      void va(global float4 *input, global float4 *output)
+      {
+        int i = get_global_id(0);
+        output[i].z = 42.f;
+      }
+      
+      void vb(global float4 *input, global float4 *output)
+      {
+        int i = get_global_id(0);
+        output[i].z = 7.f;
+        output[i].y = 42.f;
+      }
+      
+      void vc(global float4 *input, global float4 *output)
+      {
+        int i = get_global_id(0);
+        output[i].zy = (float2)(7.f,42.f);
+      }
+      
+      void vd(global float4 *input, global float4 *output)
+      {
+        int i = get_global_id(0);
+        output[i].y = output[i].z;
+      }
+      
+      void ve(global float4 *input, global float4 *output)
+      {
+        int i = get_global_id(0);
+        output[i].wzyx = output[i];
+      }
+      
+      void vf(global float4 *input, global float4 *output)
+      {
+        int i = get_global_id(0);
+        output[i].zy = output[i].yz;
+      }
+      
+      void vg(global float4 *input, global float4 *output)
+      {
+        int i = get_global_id(0);
+        output[i].wzyx = input[i];
+      }
+      
+      void vh(global float4 *input, global float4 *output)
+      {
+        int i = get_global_id(0);
+        output[i].zy = input[i].yz;
+      }
+      
+      void vi(global float4 *input, global float4 *output)
+      {
+        int i = get_global_id(0);
+      
+        float4 x = output[i];
+        x.z = 42.f;
+        output[i] = x;
+        output[i+1] = x;
+      }
+      
+      void sa(global S *input, global S *output)
+      {
+        int i = get_global_id(0);
+        output[i].c = 42;
+      }
+      
+      void sb(global S *input, global S *output)
+      {
+        int i = get_global_id(0);
+        output[i].c = output[i].b;
+      }
+      
+      void sc(global S *input, global S *output)
+      {
+        int i = get_global_id(0);
+        output[i].c = input[i].b;
+      }
+      
+      kernel void lvalue_loads(
+        global float4 *vIn,
+        global float4 *vA,
+        global float4 *vB,
+        global float4 *vC,
+        global float4 *vD,
+        global float4 *vE,
+        global float4 *vF,
+        global float4 *vG,
+        global float4 *vH,
+        global float4 *vI,
+      
+        global S      *sIn,
+        global S      *sA,
+        global S      *sB,
+        global S      *sC,
+      
+        global float  *nop
+        )
+      {
+        va(vIn, vA);
+        vb(vIn, vB);
+        vc(vIn, vC);
+        vd(vIn, vD);
+        ve(vIn, vE);
+        vf(vIn, vF);
+        vg(vIn, vG);
+        vh(vIn, vH);
+        vi(vIn, vI);
+      
+        sa(sIn, sA);
+        sb(sIn, sB);
+        sc(sIn, sC);
+      }
+
+  - name: switch_case
+    origin: misc/switch_case
+    entry: switch_case
+    global_size: [8, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 32, data: [2, 3, 2, 0, 1, 5, -1, 4] }
+      - { buffer: 32 }
+    expected: {}
+    source: |
+      kernel void switch_case(global int *input, global int *output)
+      {
+        int i = get_global_id(0);
+        int in = input[i];
+        int out;
+        switch (in)
+        {
+        case 0:
+          out = -7;
+          break;
+        case 1:
+          out = i;
+          break;
+        case 2:
+        case 3:
+        case 4:
+          out = in + i;
+          break;
+        default:
+          out = 42;
+          break;
+        }
+      
+        output[i] = out;
+      }
+
+  - name: vecadd
+    origin: misc/vecadd
+    entry: vecadd
+    global_size: [1024, 1, 1]
+    local_size: [16, 1, 1]
+    arguments:
+      - { buffer: 4096, range: [0, 1, 1023] }
+      - { buffer: 4096, range: [0, 1, 1023] }
+      - { buffer: 4096 }
+    expected: {}
+    source: |
+      kernel void vecadd(global float *a, global float *b, global float *c)
+      {
+        size_t i = get_global_id(0);
+        c[i] = a[i] + b[i];
+      }
+
+  - name: vector_argument
+    origin: misc/vector_argument
+    entry: vector_argument
+    global_size: [4, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { value: [7, 42, 0, -1], elem: uint }
+      - { buffer: 16 }
+    expected: {}
+    source: |
+      kernel void vector_argument(int4 vector, global int4 *output)
+      {
+        *output = vector + 42;
+      }
+
+  - name: program_scope_constant_array
+    origin: misc/program_scope_constant_array
+    entry: program_scope_constant_array
+    global_size: [4, 1, 1]
+    local_size: [1, 1, 1]
+    arguments:
+      - { buffer: 16 }
+    expected: {}
+    source: |
+      constant int data[4] = {7, 42, 0, -1};
+      
+      kernel void program_scope_constant_array(global int *output)
+      {
+        int i = get_global_id(0);
+        output[i] = data[i];
+      }
+
+  - name: kernel_scope_local_mem_usage_kernel1
+    origin: runtime/kernel_scope_local_mem_usage
+    entry: kernel1
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 80 }
+    local_memory: 40
+    expected:
+      data_race: 3
+    source: |
+      kernel void kernel1(global int *data)
+      {
+        local int scratch[10];
+        size_t lid = get_local_id(0);
+        scratch[lid] = data[lid];
+        barrier(CLK_LOCAL_MEM_FENCE);
+        int sum = 0;
+        for (int i = 0; i < 10; i++)
+          sum += scratch[i];
+        data[0] = sum;
+      }
+      
+      kernel void kernel2(global int *data)
+      {
+        local int scratch[20];
+        size_t lid = get_local_id(0);
+        scratch[lid] = data[lid];
+        barrier(CLK_LOCAL_MEM_FENCE);
+        int sum = 0;
+        for (int i = 0; i < 20; i++)
+          sum += scratch[i];
+        data[0] = sum;
+      }
+
+  - name: kernel_scope_local_mem_usage_kernel2
+    origin: runtime/kernel_scope_local_mem_usage
+    entry: kernel2
+    global_size: [4, 1, 1]
+    local_size: [4, 1, 1]
+    arguments:
+      - { buffer: 80 }
+    local_memory: 80
+    expected:
+      data_race: 3
+    source: |
+      kernel void kernel1(global int *data)
+      {
+        local int scratch[10];
+        size_t lid = get_local_id(0);
+        scratch[lid] = data[lid];
+        barrier(CLK_LOCAL_MEM_FENCE);
+        int sum = 0;
+        for (int i = 0; i < 10; i++)
+          sum += scratch[i];
+        data[0] = sum;
+      }
+      
+      kernel void kernel2(global int *data)
+      {
+        local int scratch[20];
+        size_t lid = get_local_id(0);
+        scratch[lid] = data[lid];
+        barrier(CLK_LOCAL_MEM_FENCE);
+        int sum = 0;
+        for (int i = 0; i < 20; i++)
+          sum += scratch[i];
+        data[0] = sum;
+      }
+
