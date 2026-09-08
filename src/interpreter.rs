@@ -1,4 +1,6 @@
+use crate::address;
 use crate::bitcode;
+use crate::detectors;
 use crate::value;
 
 pub use crate::bitcode::AtomicOp as Atomic;
@@ -10,6 +12,7 @@ pub enum Error {
     UnboundValue(bitcode::Id),
     ReadOnlyRegion,
     OutOfBounds,
+    InvalidAddress,
     ArgumentMismatch,
     UnsupportedRegion,
     Unreachable,
@@ -17,6 +20,7 @@ pub enum Error {
     NoFrame,
     NoPredecessor,
     OutOfFuel,
+    OutOfSlots,
     UnexpectedResume,
 }
 
@@ -29,6 +33,12 @@ impl From<value::Error> for Error {
 impl From<bitcode::Error> for Error {
     fn from(error: bitcode::Error) -> Error {
         Error::Bitcode(error)
+    }
+}
+
+impl From<address::Invalid> for Error {
+    fn from(_: address::Invalid) -> Error {
+        Error::InvalidAddress
     }
 }
 
@@ -66,13 +76,14 @@ pub enum YieldReason {
     },
     Builtin(bitcode::Builtin),
     MemoryBarrier {
-        semantics: u64,
+        semantics: bitcode::MemorySemantics,
     },
     ControlBarrier {
         execution_scope: u64,
-        semantics: u64,
+        semantics: bitcode::MemorySemantics,
     },
     Break,
+    Diagnostic(detectors::DiagnosticList),
 }
 
 impl YieldReason {
@@ -87,7 +98,8 @@ impl YieldReason {
                     | YieldReason::WriteLocal { .. }
                     | YieldReason::MemoryBarrier { .. }
                     | YieldReason::ControlBarrier { .. }
-                    | YieldReason::Break,
+                    | YieldReason::Break
+                    | YieldReason::Diagnostic(_),
                 Resume::Ack
             ) | (YieldReason::Atomic { .. }, Resume::Scalar(_))
                 | (YieldReason::Builtin(_), Resume::Builtin(_))
@@ -138,26 +150,85 @@ impl Frame {
 #[derive(Debug, Clone)]
 pub struct Interpreter {
     module: std::sync::Arc<bitcode::Module>,
-    module_storage: Vec<u8>,
-    module_offsets: Vec<Option<usize>>,
-    local_offsets: Vec<Option<usize>>,
+    mutable_storage: address::Storage,
+    constant_storage: address::Storage,
+    private_addresses: Vec<Option<u64>>,
+    local_addresses: std::sync::Arc<Vec<Option<u64>>>,
     frames: Vec<Frame>,
-    storage: Vec<u8>,
+    storage: address::Storage,
     fuel: usize,
     debug: bool,
+    checks: detectors::Checks,
     pending: Option<YieldReason>,
     stepped: bool,
     broke_at: Option<(bitcode::Id, u32)>,
     location: Option<bitcode::Location>,
 }
 
-pub fn local_memory_size(module: &bitcode::Module) -> Result<usize, Error> {
-    Ok(local_layout(module)?.1)
+pub fn builtin_to_addr(builtin: bitcode::Builtin) -> u64 {
+    let slot = match builtin {
+        bitcode::Builtin::NumWorkgroups => 100,
+        bitcode::Builtin::WorkgroupSize => 200,
+        bitcode::Builtin::WorkgroupId => 300,
+        bitcode::Builtin::LocalInvocationId => 400,
+        bitcode::Builtin::GlobalInvocationId => 500,
+        bitcode::Builtin::GlobalOffset => 600,
+    };
+
+    address::encode(Some(address::Region::Builtin), slot, 0)
 }
 
-fn local_layout(module: &bitcode::Module) -> Result<(Vec<Option<usize>>, usize), Error> {
-    let mut offsets = vec![None; module.bound()];
-    let mut size = 0;
+pub fn builtin_from_addr(address: u64) -> Result<bitcode::Builtin, Error> {
+    let (region, slot, _) = address::decode(address);
+
+    Ok(match (region, slot) {
+        (Some(address::Region::Builtin), 100) => bitcode::Builtin::NumWorkgroups,
+        (Some(address::Region::Builtin), 200) => bitcode::Builtin::WorkgroupSize,
+        (Some(address::Region::Builtin), 300) => bitcode::Builtin::WorkgroupId,
+        (Some(address::Region::Builtin), 400) => bitcode::Builtin::LocalInvocationId,
+        (Some(address::Region::Builtin), 500) => bitcode::Builtin::GlobalInvocationId,
+        (Some(address::Region::Builtin), 600) => bitcode::Builtin::GlobalOffset,
+        (_, slot) => return Err(bitcode::Error::UnsupportedBuiltin(slot as u32).into()),
+    })
+}
+
+fn private_layout(
+    module: &bitcode::Module,
+) -> Result<(Vec<Option<u64>>, address::Storage, address::Storage), Error> {
+    let mut mutable_storage = address::Storage::new(address::Region::Mutable);
+    let mut constant_storage = address::Storage::new(address::Region::Constant);
+    let mut addresses = vec![None; module.bound()];
+
+    for variable in module.variables() {
+        let storage = match variable.storage {
+            bitcode::StorageClass::Private => &mut mutable_storage,
+            bitcode::StorageClass::UniformConstant => &mut constant_storage,
+            _ => continue,
+        };
+
+        let pointee_type = module.pointee_type(variable.result_type)?;
+        let layout = module.layout(pointee_type)?;
+        let (size, alignment) = (layout.size, layout.alignment);
+        let address = storage.allocate(size, alignment).ok_or(Error::OutOfSlots)?;
+
+        addresses[variable.result as usize] = Some(address);
+
+        if let Some(initializer) = variable.initializer {
+            let value = value::constant(module, initializer)?;
+            let destination = storage.write(address, size)?;
+
+            value::encode(module, pointee_type, &value, destination)?;
+        }
+    }
+
+    Ok((addresses, mutable_storage, constant_storage))
+}
+
+pub fn local_layout(
+    module: &bitcode::Module,
+) -> Result<(std::sync::Arc<Vec<Option<u64>>>, address::Storage), Error> {
+    let mut addresses = vec![None; module.bound()];
+    let mut storage = address::Storage::new(address::Region::Local);
 
     let stored = module
         .variables()
@@ -167,21 +238,22 @@ fn local_layout(module: &bitcode::Module) -> Result<(Vec<Option<usize>>, usize),
     for variable in stored {
         let pointee_type = module.pointee_type(variable.result_type)?;
         let layout = module.layout(pointee_type)?;
-        let offset = bitcode::align_up(size, layout.alignment);
 
-        offsets[variable.result as usize] = Some(offset);
-        size = offset + layout.size;
+        let address = storage
+            .allocate(layout.size, layout.alignment)
+            .ok_or(Error::OutOfSlots)?;
+
+        addresses[variable.result as usize] = Some(address);
     }
 
-    Ok((offsets, size))
+    Ok((std::sync::Arc::new(addresses), storage))
 }
 
-fn offset_of(offsets: &[Option<usize>], id: bitcode::Id) -> Result<u64, Error> {
-    offsets
+fn address_of(addresses: &[Option<u64>], id: bitcode::Id) -> Result<u64, Error> {
+    addresses
         .get(id as usize)
         .copied()
         .flatten()
-        .map(|offset| offset as u64)
         .ok_or(Error::UnboundValue(id))
 }
 
@@ -210,32 +282,12 @@ impl Interpreter {
         module: std::sync::Arc<bitcode::Module>,
         function: bitcode::Id,
         arguments: &[Argument],
+        local_addresses: std::sync::Arc<Vec<Option<u64>>>,
         fuel: usize,
         debug: bool,
+        checks: detectors::Checks,
     ) -> Result<Interpreter, Error> {
-        let mut module_storage: Vec<u8> = Vec::new();
-        let mut module_offsets = vec![None; module.bound()];
-
-        let stored = module.variables().iter().filter(|variable| {
-            matches!(
-                variable.storage,
-                bitcode::StorageClass::UniformConstant | bitcode::StorageClass::Private
-            )
-        });
-
-        for variable in stored {
-            let pointee_type = module.pointee_type(variable.result_type)?;
-            let size = module.layout(pointee_type)?.size;
-            let offset = module_storage.len();
-
-            module_storage.resize(offset + size, 0);
-            module_offsets[variable.result as usize] = Some(offset);
-
-            if let Some(initializer) = variable.initializer {
-                let value = value::constant(&module, initializer)?;
-                value::encode(&module, pointee_type, &value, &mut module_storage[offset..])?;
-            }
-        }
+        let (private_addresses, mutable_storage, constant_storage) = private_layout(&module)?;
 
         let entry = module.function(function)?;
         if entry.parameters.len() != arguments.len() {
@@ -246,31 +298,27 @@ impl Interpreter {
 
         for (parameter, argument) in entry.parameters.iter().zip(arguments) {
             values[parameter.result as usize] = Some(match argument {
-                Argument::Buffer(address) => {
-                    let storage = module.storage_class(parameter.result_type)?;
-
-                    value::Value::Pointer(value::Pointer {
-                        region: value::Region::from_storage_class(storage)?,
-                        address: *address,
-                        pointee_type: module.pointee_type(parameter.result_type)?,
-                    })
-                }
+                Argument::Buffer(address) => value::Value::Pointer(value::Pointer {
+                    address: *address,
+                    pointee_type: module.pointee_type(parameter.result_type)?,
+                }),
                 Argument::Value(bytes) => value::decode(&module, parameter.result_type, bytes)?,
             });
         }
 
         let frame = Frame::new(function, entry.entry_label()?, values, None, 0);
-        let (local_offsets, _) = local_layout(&module)?;
 
         Ok(Interpreter {
             module,
-            module_storage,
-            module_offsets,
-            local_offsets,
+            mutable_storage,
+            constant_storage,
+            private_addresses,
+            local_addresses,
             frames: vec![frame],
-            storage: Vec::new(),
+            storage: address::Storage::new(address::Region::Invocation),
             fuel,
             debug,
+            checks,
             pending: None,
             stepped: false,
             broke_at: None,
@@ -289,6 +337,7 @@ impl Interpreter {
                 self.stepped = true;
                 None
             }
+            (Some(YieldReason::Diagnostic(_)), Resume::Ack) => None,
             (Some(reason), resume) if reason.accepts(&resume) => Some(resume),
             _ => return Err(Error::UnexpectedResume),
         };
@@ -361,27 +410,33 @@ impl Interpreter {
                 let pointee_type = self.module.pointee_type(*result_type)?;
                 let layout = self.module.layout(pointee_type)?;
                 let (size, alignment) = (layout.size, layout.alignment);
-                let address = bitcode::align_up(self.storage.len(), alignment);
-                let pointer = value::Pointer {
-                    region: value::Region::Invocation,
-                    address: address as u64,
-                    pointee_type,
+
+                let address = self
+                    .storage
+                    .allocate(size, alignment)
+                    .ok_or(Error::OutOfSlots)?;
+
+                let pointer = value::Pointer { address, pointee_type };
+                let diagnostics = match initializer {
+                    Some(initializer) => {
+                        let value = self.value(*initializer)?;
+
+                        self.write_internal(pointer, size, &value)?
+                    }
+                    None => detectors::DiagnosticList::new(),
                 };
-
-                self.storage.resize(address + size, 0);
-
-                if let Some(initializer) = initializer {
-                    let value = self.value(*initializer)?;
-
-                    self.write_internal(pointer, size, &value)?;
-                }
 
                 self.bind(*result, value::Value::Pointer(pointer))?;
                 self.advance()?;
+
+                if !diagnostics.is_empty() {
+                    return self.yield_(YieldReason::Diagnostic(diagnostics));
+                }
             }
 
-            bitcode::Instruction::Load { result, pointer, .. } => {
+            bitcode::Instruction::Load { result, pointer, alignment, .. } => {
                 let target = self.value(*pointer)?.as_pointer()?;
+                let size = self.module.layout(target.pointee_type)?.size;
 
                 match resume.take() {
                     Some(Resume::Bytes(bytes)) => {
@@ -389,6 +444,13 @@ impl Interpreter {
 
                         self.bind(*result, value)?;
                         self.advance()?;
+
+                        let mut diagnostics = detectors::DiagnosticList::new();
+                        diagnostics.extend(self.alignment(target, size, *alignment, false)?);
+
+                        if !diagnostics.is_empty() {
+                            return self.yield_(YieldReason::Diagnostic(diagnostics));
+                        }
                     }
                     Some(Resume::Builtin(raw)) => {
                         let value = value::from_raw(&self.module, target.pointee_type, raw)?;
@@ -397,63 +459,98 @@ impl Interpreter {
                         self.advance()?;
                     }
                     Some(_) => return Err(Error::UnexpectedResume),
-                    None => match target.region {
-                        value::Region::Builtin(builtin) => {
-                            return self.yield_(YieldReason::Builtin(builtin));
-                        }
-                        value::Region::Global => {
-                            let size = self.module.layout(target.pointee_type)?.size;
+                    None => {
+                        let address = target.address;
 
-                            return self
-                                .yield_(YieldReason::Read { address: target.address, size });
-                        }
-                        value::Region::Local => {
-                            let size = self.module.layout(target.pointee_type)?.size;
+                        match address::region(address) {
+                            Some(address::Region::Builtin) => {
+                                let builtin = builtin_from_addr(address)?;
+                                return self.yield_(YieldReason::Builtin(builtin));
+                            }
+                            Some(address::Region::Global) | None => {
+                                return self.yield_(YieldReason::Read { address, size });
+                            }
+                            Some(address::Region::Local) => {
+                                return self.yield_(YieldReason::ReadLocal { address, size });
+                            }
+                            Some(address::Region::Mutable)
+                            | Some(address::Region::Constant)
+                            | Some(address::Region::Invocation) => {
+                                let (value, mut diagnostics) = self.read_internal(target, size)?;
 
-                            return self
-                                .yield_(YieldReason::ReadLocal { address: target.address, size });
-                        }
-                        _ => {
-                            let size = self.module.layout(target.pointee_type)?.size;
-                            let value = self.read_internal(target, size)?;
+                                self.bind(*result, value)?;
+                                self.advance()?;
 
-                            self.bind(*result, value)?;
-                            self.advance()?;
-                        }
-                    },
-                }
-            }
+                                diagnostics
+                                    .extend(self.alignment(target, size, *alignment, false)?);
 
-            bitcode::Instruction::Store { pointer, object } => match resume.take() {
-                Some(Resume::Ack) => self.advance()?,
-                Some(_) => return Err(Error::UnexpectedResume),
-                None => {
-                    let target = self.value(*pointer)?.as_pointer()?;
-                    let value = self.value(*object)?;
-                    let size = self.module.layout(target.pointee_type)?.size;
-
-                    match target.region {
-                        value::Region::Global | value::Region::Local => {
-                            let mut bytes = vec![0u8; size];
-
-                            value::encode(&self.module, target.pointee_type, &value, &mut bytes)?;
-
-                            let address = target.address;
-                            let reason = if target.region == value::Region::Global {
-                                YieldReason::Write { address, bytes }
-                            } else {
-                                YieldReason::WriteLocal { address, bytes }
-                            };
-
-                            return self.yield_(reason);
-                        }
-                        _ => {
-                            self.write_internal(target, size, &value)?;
-                            self.advance()?;
+                                if !diagnostics.is_empty() {
+                                    return self.yield_(YieldReason::Diagnostic(diagnostics));
+                                }
+                            }
                         }
                     }
                 }
-            },
+            }
+
+            bitcode::Instruction::Store { pointer, object, alignment } => {
+                let target = self.value(*pointer)?.as_pointer()?;
+                let size = self.module.layout(target.pointee_type)?.size;
+
+                match resume.take() {
+                    Some(Resume::Ack) => {
+                        self.advance()?;
+
+                        let mut diagnostics = detectors::DiagnosticList::new();
+                        diagnostics.extend(self.alignment(target, size, *alignment, true)?);
+
+                        if !diagnostics.is_empty() {
+                            return self.yield_(YieldReason::Diagnostic(diagnostics));
+                        }
+                    }
+                    Some(_) => return Err(Error::UnexpectedResume),
+                    None => {
+                        let value = self.value(*object)?;
+
+                        match address::region(target.address) {
+                            Some(address::Region::Constant) | Some(address::Region::Builtin) => {
+                                return Err(Error::ReadOnlyRegion);
+                            }
+                            Some(address::Region::Global) | Some(address::Region::Local) | None => {
+                                let mut bytes = vec![0u8; size];
+
+                                value::encode(
+                                    &self.module,
+                                    target.pointee_type,
+                                    &value,
+                                    &mut bytes,
+                                )?;
+
+                                let address = target.address;
+                                let reason = match address::region(address) {
+                                    Some(address::Region::Local) => {
+                                        YieldReason::WriteLocal { address, bytes }
+                                    }
+                                    _ => YieldReason::Write { address, bytes },
+                                };
+
+                                return self.yield_(reason);
+                            }
+                            Some(address::Region::Mutable) | Some(address::Region::Invocation) => {
+                                let mut diagnostics = self.write_internal(target, size, &value)?;
+
+                                self.advance()?;
+
+                                diagnostics.extend(self.alignment(target, size, *alignment, true)?);
+
+                                if !diagnostics.is_empty() {
+                                    return self.yield_(YieldReason::Diagnostic(diagnostics));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             bitcode::Instruction::AccessChain { result, result_type, base, indices, element } => {
                 let mut pointer = self.value(*base)?.as_pointer()?;
@@ -467,8 +564,12 @@ impl Interpreter {
                     0
                 };
 
+                let mut diagnostics = detectors::DiagnosticList::new();
+
                 for index_id in &indices[walked..] {
                     let index = self.value(*index_id)?.as_bits()? as usize;
+                    diagnostics.extend(self.element_index(pointer.pointee_type, index as u64)?);
+
                     let offset = self.module.member_offset(pointer.pointee_type, index)?;
                     pointer.pointee_type = self.module.member_type(pointer.pointee_type, index)?;
                     pointer.address = pointer.address.wrapping_add(offset as u64);
@@ -478,6 +579,10 @@ impl Interpreter {
 
                 self.bind(*result, value::Value::Pointer(pointer))?;
                 self.advance()?;
+
+                if !diagnostics.is_empty() {
+                    return self.yield_(YieldReason::Diagnostic(diagnostics));
+                }
             }
 
             bitcode::Instruction::Unary { result, result_type, operation, operand } => {
@@ -701,7 +806,6 @@ impl Interpreter {
             } => {
                 let target = self.value(*pointer)?.as_pointer()?;
                 let width = self.module.scalar_width(target.pointee_type)?;
-
                 match resume.take() {
                     Some(Resume::Scalar(previous)) => {
                         if let Some(result) = result {
@@ -709,6 +813,13 @@ impl Interpreter {
                         }
 
                         self.advance()?;
+
+                        let mut diagnostics = detectors::DiagnosticList::new();
+                        diagnostics.extend(self.atomic_width(target, width));
+
+                        if !diagnostics.is_empty() {
+                            return self.yield_(YieldReason::Diagnostic(diagnostics));
+                        }
                     }
                     Some(_) => return Err(Error::UnexpectedResume),
                     None => {
@@ -719,7 +830,7 @@ impl Interpreter {
                             operation: *operation,
                             address: target.address,
                             width,
-                            local: target.region == value::Region::Local,
+                            local: address::region(target.address) == Some(address::Region::Local),
                             value: operand,
                             comparator,
                         });
@@ -753,7 +864,13 @@ impl Interpreter {
                 }
 
                 let block = self.module.function(*function)?.entry_label()?;
-                let frame = Frame::new(*function, block, values, Some(*result), self.storage.len());
+                let frame = Frame::new(
+                    *function,
+                    block,
+                    values,
+                    Some(*result),
+                    self.storage.watermark(),
+                );
 
                 self.advance()?;
                 self.frames.push(frame);
@@ -785,11 +902,10 @@ impl Interpreter {
                     Some(_) => return Err(Error::UnexpectedResume),
                     None => {
                         let scope = self.value(*execution_scope)?.as_bits()?;
-                        let semantics = self.value(*memory_semantics)?.as_bits()?;
 
                         return self.yield_(YieldReason::ControlBarrier {
                             execution_scope: scope,
-                            semantics,
+                            semantics: *memory_semantics,
                         });
                     }
                 }
@@ -799,9 +915,8 @@ impl Interpreter {
                 Some(Resume::Ack) => self.advance()?,
                 Some(_) => return Err(Error::UnexpectedResume),
                 None => {
-                    let semantics = self.value(*memory_semantics)?.as_bits()?;
-
-                    return self.yield_(YieldReason::MemoryBarrier { semantics });
+                    return self
+                        .yield_(YieldReason::MemoryBarrier { semantics: *memory_semantics });
                 }
             },
 
@@ -822,6 +937,47 @@ impl Interpreter {
     fn yield_(&mut self, reason: YieldReason) -> Result<Option<YieldReason>, Error> {
         self.pending = Some(reason.clone());
         Ok(Some(reason))
+    }
+
+    fn alignment(
+        &self,
+        target: value::Pointer,
+        size: usize,
+        declared: Option<u32>,
+        store: bool,
+    ) -> Result<Option<detectors::Diagnostic>, Error> {
+        Ok(detectors::alignment(
+            self.checks,
+            detectors::Access::new(target.address, size, store, false, self.location),
+            declared,
+            self.module.layout(target.pointee_type)?.alignment,
+        ))
+    }
+
+    fn element_index(
+        &self,
+        aggregate: bitcode::Id,
+        index: u64,
+    ) -> Result<Option<detectors::Diagnostic>, Error> {
+        Ok(detectors::element_index(
+            self.checks,
+            index,
+            self.module.element_count(aggregate)?,
+        ))
+    }
+
+    fn atomic_width(&self, target: value::Pointer, width: u32) -> Option<detectors::Diagnostic> {
+        detectors::atomic_width(
+            self.checks,
+            detectors::Access::new(
+                target.address,
+                (width / 8) as usize,
+                true,
+                true,
+                self.location,
+            ),
+            width,
+        )
     }
 
     fn frame(&self) -> Result<&Frame, Error> {
@@ -886,24 +1042,20 @@ impl Interpreter {
 
             if let Some(builtin) = self.module.decorations(id)?.builtin {
                 return Ok(value::Value::Pointer(value::Pointer {
-                    region: value::Region::Builtin(builtin),
-                    address: 0,
+                    address: builtin_to_addr(builtin),
                     pointee_type,
                 }));
             }
 
-            let region = match variable.storage {
-                bitcode::StorageClass::UniformConstant => value::Region::Module,
-                storage => value::Region::from_storage_class(storage)?,
-            };
-            let address = match region {
-                value::Region::Module => offset_of(&self.module_offsets, id)?,
-                value::Region::Local => offset_of(&self.local_offsets, id)?,
-                _ => 0,
+            let address = match variable.storage {
+                bitcode::StorageClass::UniformConstant | bitcode::StorageClass::Private => {
+                    address_of(&self.private_addresses, id)?
+                }
+                bitcode::StorageClass::Workgroup => address_of(&self.local_addresses, id)?,
+                storage => return Err(value::Error::UnsupportedStorageClass(storage).into()),
             };
 
             return Ok(value::Value::Pointer(value::Pointer {
-                region,
                 address,
                 pointee_type,
             }));
@@ -925,23 +1077,39 @@ impl Interpreter {
         Ok(())
     }
 
-    fn read_internal(&self, pointer: value::Pointer, size: usize) -> Result<value::Value, Error> {
-        let start = pointer.address as usize;
-        let source = match pointer.region {
-            value::Region::Invocation => &self.storage,
-            value::Region::Module => &self.module_storage,
+    fn read_internal(
+        &mut self,
+        pointer: value::Pointer,
+        size: usize,
+    ) -> Result<(value::Value, detectors::DiagnosticList), Error> {
+        let Interpreter {
+            module,
+            storage,
+            mutable_storage,
+            constant_storage,
+            checks,
+            location,
+            ..
+        } = self;
+
+        let source = match address::region(pointer.address) {
+            Some(address::Region::Invocation) => storage,
+            Some(address::Region::Mutable) => mutable_storage,
+            Some(address::Region::Constant) => constant_storage,
             _ => return Err(Error::UnsupportedRegion),
         };
 
-        if start + size > source.len() {
-            return Err(Error::OutOfBounds);
-        }
+        let (value, diagnostics) = detectors::checked_read(
+            source,
+            *checks,
+            detectors::Access::new(pointer.address, size, false, false, *location),
+            |bytes| -> Result<value::Value, Error> {
+                Ok(value::decode(module, pointer.pointee_type, bytes)?)
+            },
+            || -> Result<value::Value, Error> { Ok(value::zeroed(module, pointer.pointee_type)?) },
+        )?;
 
-        Ok(value::decode(
-            &self.module,
-            pointer.pointee_type,
-            &source[start..start + size],
-        )?)
+        Ok((value, diagnostics))
     }
 
     fn write_internal(
@@ -949,27 +1117,33 @@ impl Interpreter {
         pointer: value::Pointer,
         size: usize,
         value: &value::Value,
-    ) -> Result<(), Error> {
-        let start = pointer.address as usize;
-        let destination = match pointer.region {
-            value::Region::Invocation => &mut self.storage,
-            value::Region::Module | value::Region::Builtin(_) => {
+    ) -> Result<detectors::DiagnosticList, Error> {
+        let Interpreter { module, storage, mutable_storage, checks, location, .. } = self;
+
+        let target = match address::region(pointer.address) {
+            Some(address::Region::Invocation) => storage,
+            Some(address::Region::Mutable) => mutable_storage,
+            Some(address::Region::Constant) | Some(address::Region::Builtin) => {
                 return Err(Error::ReadOnlyRegion);
             }
             _ => return Err(Error::UnsupportedRegion),
         };
 
-        if start + size > destination.len() {
-            return Err(Error::OutOfBounds);
-        }
-
-        value::encode(
-            &self.module,
-            pointer.pointee_type,
-            value,
-            &mut destination[start..start + size],
+        let (_, diagnostics) = detectors::checked_write(
+            target,
+            *checks,
+            detectors::Access::new(pointer.address, size, true, false, *location),
+            |destination| -> Result<(), Error> {
+                Ok(value::encode(
+                    module,
+                    pointer.pointee_type,
+                    value,
+                    destination,
+                )?)
+            },
+            || Ok(()),
         )?;
 
-        Ok(())
+        Ok(diagnostics)
     }
 }

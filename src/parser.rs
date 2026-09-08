@@ -1,7 +1,7 @@
 use crate::bitcode;
 
 const MAGIC: u32 = 0x0723_0203;
-
+const MEMORY_ALIGNED: u32 = 0x2;
 const DEBUG_SOURCE: u32 = 35;
 const DEBUG_LINE: u32 = 103;
 const DEBUG_NO_LINE: u32 = 104;
@@ -372,7 +372,7 @@ fn parse_inner(words: impl IntoIterator<Item = u32>) -> Result<bitcode::Module, 
             }
             _ => {
                 if let Some(block) = pending_block.as_mut() {
-                    let instruction = parse_body(opcode, &mut reader)?;
+                    let instruction = parse_body(opcode, &mut reader, &module)?;
                     let ends_block = terminates(&instruction);
 
                     block.push(instruction, current_line);
@@ -545,6 +545,7 @@ fn parse_atomic<I: Iterator<Item = u32>>(
 fn parse_body<I: Iterator<Item = u32>>(
     opcode: u16,
     reader: &mut Reader<'_, I>,
+    module: &bitcode::ModuleBuilder,
 ) -> Result<bitcode::Instruction, bitcode::Error> {
     if let Some(operation) = unary_op(opcode) {
         let result_type = reader.word()?;
@@ -585,12 +586,14 @@ fn parse_body<I: Iterator<Item = u32>>(
             let result_type = reader.word()?;
             let result = reader.word()?;
             let pointer = reader.word()?;
-            bitcode::Instruction::Load { result, result_type, pointer }
+            let alignment = memory_alignment(reader);
+            bitcode::Instruction::Load { result, result_type, pointer, alignment }
         }
         62 => {
             let pointer = reader.word()?;
             let object = reader.word()?;
-            bitcode::Instruction::Store { pointer, object }
+            let alignment = memory_alignment(reader);
+            bitcode::Instruction::Store { pointer, object, alignment }
         }
         65 | 66 => {
             let result_type = reader.word()?;
@@ -730,12 +733,12 @@ fn parse_body<I: Iterator<Item = u32>>(
         224 => {
             let execution_scope = reader.word()?;
             let _memory_scope = reader.word()?;
-            let memory_semantics = reader.word()?;
+            let memory_semantics = memory_semantics(module, reader.word()?)?;
             bitcode::Instruction::Barrier { execution_scope, memory_semantics }
         }
         225 => {
             let _memory_scope = reader.word()?;
-            let memory_semantics = reader.word()?;
+            let memory_semantics = memory_semantics(module, reader.word()?)?;
             bitcode::Instruction::MemoryBarrier { memory_semantics }
         }
         253 => bitcode::Instruction::Return,
@@ -772,6 +775,22 @@ fn debug_location(
         line,
         column: literal(module, *column)?,
     }))
+}
+
+fn memory_alignment<I: Iterator<Item = u32>>(reader: &mut Reader<'_, I>) -> Option<u32> {
+    let operands = reader.try_word()?;
+
+    match operands & MEMORY_ALIGNED {
+        0 => None,
+        _ => reader.try_word(),
+    }
+}
+
+fn memory_semantics(
+    module: &bitcode::ModuleBuilder,
+    id: bitcode::Id,
+) -> Result<bitcode::MemorySemantics, bitcode::Error> {
+    bitcode::MemorySemantics::from_word(literal(module, id)?)
 }
 
 fn literal(module: &bitcode::ModuleBuilder, id: bitcode::Id) -> Result<u32, bitcode::Error> {

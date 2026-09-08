@@ -3,6 +3,7 @@ pub type Id = u32;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     UnsupportedStorageClass(u32),
+    UnsupportedMemorySemantics(u32),
     UnsupportedBuiltin(u32),
     IdOutOfRange(Id),
     NotABlock(Id),
@@ -27,6 +28,87 @@ pub enum Addressing {
     Logical,
     Physical32,
     Physical64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemoryOrder {
+    #[default]
+    Relaxed,
+    Acquire,
+    Release,
+    AcquireRelease,
+    SequentiallyConsistent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemorySpace {
+    #[default]
+    None,
+    Workgroup,
+    CrossWorkgroup,
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MemorySemantics {
+    pub order: MemoryOrder,
+    pub space: MemorySpace,
+}
+
+impl MemorySemantics {
+    const ACQUIRE: u32 = 0x2;
+    const RELEASE: u32 = 0x4;
+    const ACQUIRE_RELEASE: u32 = 0x8;
+    const SEQUENTIALLY_CONSISTENT: u32 = 0x10;
+    const UNIFORM: u32 = 0x40;
+    const SUBGROUP: u32 = 0x80;
+    const WORKGROUP: u32 = 0x100;
+    const CROSS_WORKGROUP: u32 = 0x200;
+    const ATOMIC_COUNTER: u32 = 0x400;
+    const IMAGE: u32 = 0x800;
+
+    const KNOWN: u32 = MemorySemantics::ACQUIRE
+        | MemorySemantics::RELEASE
+        | MemorySemantics::ACQUIRE_RELEASE
+        | MemorySemantics::SEQUENTIALLY_CONSISTENT
+        | MemorySemantics::UNIFORM
+        | MemorySemantics::SUBGROUP
+        | MemorySemantics::WORKGROUP
+        | MemorySemantics::CROSS_WORKGROUP
+        | MemorySemantics::ATOMIC_COUNTER
+        | MemorySemantics::IMAGE;
+
+    pub fn from_word(word: u32) -> Result<MemorySemantics, Error> {
+        if word & !MemorySemantics::KNOWN != 0 {
+            return Err(Error::UnsupportedMemorySemantics(word));
+        }
+
+        let set = |bit: u32| word & bit != 0;
+
+        let order = if set(MemorySemantics::SEQUENTIALLY_CONSISTENT) {
+            MemoryOrder::SequentiallyConsistent
+        } else if set(MemorySemantics::ACQUIRE_RELEASE) {
+            MemoryOrder::AcquireRelease
+        } else if set(MemorySemantics::RELEASE) {
+            MemoryOrder::Release
+        } else if set(MemorySemantics::ACQUIRE) {
+            MemoryOrder::Acquire
+        } else {
+            MemoryOrder::Relaxed
+        };
+
+        let space = match (
+            set(MemorySemantics::WORKGROUP),
+            set(MemorySemantics::CROSS_WORKGROUP),
+        ) {
+            (false, false) => MemorySpace::None,
+            (true, false) => MemorySpace::Workgroup,
+            (false, true) => MemorySpace::CrossWorkgroup,
+            (true, true) => MemorySpace::Both,
+        };
+
+        Ok(MemorySemantics { order, space })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,10 +403,12 @@ pub enum Instruction {
         result: Id,
         result_type: Id,
         pointer: Id,
+        alignment: Option<u32>,
     },
     Store {
         pointer: Id,
         object: Id,
+        alignment: Option<u32>,
     },
     AccessChain {
         result: Id,
@@ -454,10 +538,10 @@ pub enum Instruction {
     },
     Barrier {
         execution_scope: Id,
-        memory_semantics: Id,
+        memory_semantics: MemorySemantics,
     },
     MemoryBarrier {
-        memory_semantics: Id,
+        memory_semantics: MemorySemantics,
     },
     Return,
     ReturnValue {
@@ -653,6 +737,16 @@ impl Module {
             Type::Array { element_type, .. } => Ok(*element_type),
             _ => Err(Error::UnsupportedType(type_id)),
         }
+    }
+
+    pub fn element_count(&self, type_id: Id) -> Result<Option<u64>, Error> {
+        Ok(match self.type_(type_id)? {
+            Type::Struct { member_types } => Some(member_types.len() as u64),
+            Type::Vector { count, .. } => Some(u64::from(*count)),
+            Type::Array { count: 0, .. } => None,
+            Type::Array { count, .. } => Some(*count),
+            _ => None,
+        })
     }
 
     pub fn member_offset(&self, type_id: Id, index: usize) -> Result<usize, Error> {

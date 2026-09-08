@@ -2,14 +2,16 @@ use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
 
+use vodd::address;
 use vodd::bitcode;
+use vodd::detectors;
 use vodd::interpreter;
 use vodd::parser;
 
 const ASSEMBLER: &str = "spirv-as";
 const FUEL: usize = 1 << 24;
 
-type Buffers = Vec<(u64, Vec<u8>)>;
+type Buffers = address::Storage;
 
 type Driver<'a> =
     Box<dyn Fn(&mut interpreter::Interpreter, &mut Buffers, [u64; 3]) -> Result<(), String> + 'a>;
@@ -125,8 +127,12 @@ fn run_spirv_case(spirv_case: &SpirvCase, drive: Driver<'_>) -> Result<Vec<u8>, 
             std::sync::Arc::clone(&module),
             function,
             &arguments,
+            interpreter::local_layout(&module)
+                .map_err(|error| format!("local memory: {error:?}"))?
+                .0,
             FUEL,
             false,
+            detectors::Checks::from_env().expect("VODD_CHECK"),
         )
         .map_err(|error| format!("invocation: {error:?}"))?;
 
@@ -134,14 +140,14 @@ fn run_spirv_case(spirv_case: &SpirvCase, drive: Driver<'_>) -> Result<Vec<u8>, 
             .map_err(|error| format!("work item {id}: {error}"))?;
     }
 
-    spirv_case
-        .arguments
-        .iter()
-        .enumerate()
-        .filter(|(_, argument)| argument.kind == "buffer")
-        .position(|(index, _)| index == spirv_case.out_arg)
-        .map(|buffer_index| buffers[buffer_index].1.clone())
-        .ok_or_else(|| "output argument is not a buffer".to_string())
+    let Some((&interpreter::Argument::Buffer(address), output)) = arguments
+        .get(spirv_case.out_arg)
+        .zip(spirv_case.arguments.get(spirv_case.out_arg))
+    else {
+        return Err("output argument is not a buffer".to_string());
+    };
+
+    read(&buffers, address, output.bytes.len())
 }
 
 fn driver_with_yields_expect(
@@ -228,6 +234,14 @@ fn driver_inner(
             bitcode::Builtin::WorkgroupSize => [1, 1, 1],
             _ => [0, 0, 0],
         }),
+        interpreter::YieldReason::Diagnostic(diagnostics) => {
+            let reported: Vec<String> = diagnostics
+                .into_iter()
+                .map(|diagnostic| format!("{diagnostic}"))
+                .collect();
+
+            return Err(format!("diagnostics: {}", reported.join("; ")));
+        }
         interpreter::YieldReason::MemoryBarrier { .. }
         | interpreter::YieldReason::ControlBarrier { .. }
         | interpreter::YieldReason::Break => interpreter::Resume::Ack,
@@ -268,46 +282,44 @@ fn atomic(
 }
 
 fn create_buffer(case_arguments: &[SpirvCaseArgument]) -> (Buffers, Vec<interpreter::Argument>) {
-    let (buffers, arguments): (Vec<_>, Vec<_>) = case_arguments
-        .iter()
-        .scan(0x1000u64, |next_base, argument| {
-            if argument.kind != "buffer" {
-                return Some((None, interpreter::Argument::Value(argument.bytes.clone())));
-            }
+    let mut buffers = Buffers::new(address::Region::Global);
+    let mut arguments = Vec::new();
 
-            let base = *next_base;
-            let backing = argument.bytes.clone();
+    for argument in case_arguments {
+        if argument.kind != "buffer" {
+            arguments.push(interpreter::Argument::Value(argument.bytes.clone()));
 
-            *next_base += (backing.len() as u64 + 0x1000) & !0xFFF;
+            continue;
+        }
 
-            Some((Some((base, backing)), interpreter::Argument::Buffer(base)))
-        })
-        .unzip();
+        let size = argument.bytes.len();
+        let address = buffers.allocate(size, 1).expect("global slots");
 
-    (buffers.into_iter().flatten().collect(), arguments)
+        buffers
+            .write(address, size)
+            .expect("global slot")
+            .copy_from_slice(&argument.bytes);
+
+        arguments.push(interpreter::Argument::Buffer(address));
+    }
+
+    (buffers, arguments)
 }
 
 fn read(buffers: &Buffers, address: u64, size: usize) -> Result<Vec<u8>, String> {
-    let (index, offset) = locate(buffers, address, size)?;
-
-    Ok(buffers[index].1[offset..offset + size].to_vec())
+    buffers
+        .read(address, size)
+        .map(<[u8]>::to_vec)
+        .map_err(|fault| format!("address {address:#x}: {fault:?}"))
 }
 
 fn write(buffers: &mut Buffers, address: u64, bytes: &[u8]) -> Result<(), String> {
-    let (index, offset) = locate(buffers, address, bytes.len())?;
-    buffers[index].1[offset..offset + bytes.len()].copy_from_slice(bytes);
+    buffers
+        .write(address, bytes.len())
+        .map_err(|fault| format!("address {address:#x}: {fault:?}"))?
+        .copy_from_slice(bytes);
 
     Ok(())
-}
-
-fn locate(buffers: &Buffers, address: u64, length: usize) -> Result<(usize, usize), String> {
-    for (index, (base, bytes)) in buffers.iter().enumerate() {
-        if address >= *base && address + length as u64 <= *base + bytes.len() as u64 {
-            return Ok((index, (address - *base) as usize));
-        }
-    }
-
-    Err(format!("address {address:#x} is not inside any buffer"))
 }
 
 fn load_spirv_cases() -> Vec<SpirvCase> {
@@ -375,11 +387,21 @@ fn yield_reason(entry: &yaml_rust2::Yaml, context: &str) -> interpreter::YieldRe
 
     match kind {
         "memory_barrier" => interpreter::YieldReason::MemoryBarrier {
-            semantics: integer_field(entry, "semantics", context) as u64,
+            semantics: bitcode::MemorySemantics::from_word(integer_field(
+                entry,
+                "semantics",
+                context,
+            ) as u32)
+            .expect("memory semantics"),
         },
         "control_barrier" => interpreter::YieldReason::ControlBarrier {
             execution_scope: integer_field(entry, "execution_scope", context) as u64,
-            semantics: integer_field(entry, "semantics", context) as u64,
+            semantics: bitcode::MemorySemantics::from_word(integer_field(
+                entry,
+                "semantics",
+                context,
+            ) as u32)
+            .expect("memory semantics"),
         },
         other => panic!("{context}: unknown expected yield kind {other}"),
     }

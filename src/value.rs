@@ -19,34 +19,7 @@ impl From<bitcode::Error> for Error {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Region {
-    Global,
-    Local,
-    Module,
-    Invocation,
-    Generic,
-    Builtin(bitcode::Builtin),
-}
-
-impl Region {
-    pub fn from_storage_class(storage: bitcode::StorageClass) -> Result<Region, Error> {
-        Ok(match storage {
-            bitcode::StorageClass::CrossWorkgroup => Region::Global,
-            bitcode::StorageClass::Workgroup => Region::Local,
-            bitcode::StorageClass::UniformConstant => Region::Global,
-            bitcode::StorageClass::Private => Region::Module,
-            bitcode::StorageClass::Function => Region::Invocation,
-            bitcode::StorageClass::Generic => Region::Generic,
-            bitcode::StorageClass::Input => {
-                return Err(Error::UnsupportedStorageClass(storage));
-            }
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pointer {
-    pub region: Region,
     pub address: u64,
     pub pointee_type: bitcode::Id,
 }
@@ -133,8 +106,7 @@ pub(crate) fn decode(
         bitcode::Type::Int { width } | bitcode::Type::Float { width } => {
             Value::from_bits(bits_from_le(source, (*width as usize).div_ceil(8))?, *width)
         }
-        bitcode::Type::Pointer { storage, pointee_type } => Value::Pointer(Pointer {
-            region: Region::from_storage_class(*storage)?,
+        bitcode::Type::Pointer { pointee_type, .. } => Value::Pointer(Pointer {
             address: bits_from_le(source, module.layout(type_id)?.size)?,
             pointee_type: *pointee_type,
         }),
@@ -221,11 +193,9 @@ pub(crate) fn zeroed(module: &bitcode::Module, type_id: bitcode::Id) -> Result<V
         bitcode::Type::Int { width } | bitcode::Type::Float { width } => {
             Value::from_bits(0, *width)
         }
-        bitcode::Type::Pointer { storage, pointee_type } => Value::Pointer(Pointer {
-            region: Region::from_storage_class(*storage)?,
-            address: 0,
-            pointee_type: *pointee_type,
-        }),
+        bitcode::Type::Pointer { pointee_type, .. } => {
+            Value::Pointer(Pointer { address: 0, pointee_type: *pointee_type })
+        }
         bitcode::Type::Vector { component_type, count } => Value::Composite(
             (0..*count)
                 .map(|_| zeroed(module, *component_type))
@@ -627,14 +597,13 @@ fn bitcast_pointer(
     result_type: bitcode::Id,
     value: &Value,
 ) -> Result<Option<Value>, Error> {
-    if let bitcode::Type::Pointer { storage, pointee_type } = module.type_(result_type)? {
-        let (region, address) = match value {
-            Value::Pointer(pointer) => (pointer.region, pointer.address),
-            scalar => (Region::from_storage_class(*storage)?, scalar.as_bits()?),
+    if let bitcode::Type::Pointer { pointee_type, .. } = module.type_(result_type)? {
+        let address = match value {
+            Value::Pointer(pointer) => pointer.address,
+            scalar => scalar.as_bits()?,
         };
 
         return Ok(Some(Value::Pointer(Pointer {
-            region,
             address,
             pointee_type: *pointee_type,
         })));

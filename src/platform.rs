@@ -1,7 +1,11 @@
+use crate::address;
 use crate::bitcode;
 use crate::compiler;
+use crate::detectors;
 use crate::interpreter;
+use crate::logger;
 use crate::parser;
+
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -110,6 +114,18 @@ pub enum Error {
     InvalidGlobalOffset,
     InvalidGlobalWorkSize,
     InvalidSampler,
+}
+
+impl From<detectors::EnvError> for Error {
+    fn from(_: detectors::EnvError) -> Error {
+        Error::InvalidValue
+    }
+}
+
+impl From<address::Invalid> for Error {
+    fn from(_: address::Invalid) -> Error {
+        Error::OutOfResources
+    }
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -1388,7 +1404,7 @@ impl CommandQueue {
         command_type: CommandType,
         wait: Vec<EventId>,
     ) -> Result<EventId> {
-        let (launch, required, context) = Kernel::snapshot(kernel)?;
+        let (launch, required) = Kernel::snapshot(kernel)?;
         let grid = geometry.resolve(required);
 
         Self::validate_grid(
@@ -1396,11 +1412,11 @@ impl CommandQueue {
             geometry.local.is_some().then_some(required).flatten(),
         )?;
 
-        if launch.arena as u64 > LOCAL_MEM_SIZE {
+        if launch.local_storage.capacity() as u64 > LOCAL_MEM_SIZE {
             return Err(Error::InvalidWorkGroupSize);
         }
 
-        if Self::context(id)? != context {
+        if Self::context(id)? != launch.context {
             return Err(Error::InvalidContext);
         }
 
@@ -2151,28 +2167,6 @@ pub enum KernelWorkGroupInfo {
     PrivateMemSize,
 }
 
-pub struct Kernel {
-    reference_count: u32,
-    context: ContextId,
-    program: ProgramId,
-    name: String,
-    module: Arc<bitcode::Module>,
-    function: bitcode::Id,
-    signature: Vec<ArgumentKind>,
-    required_work_group_size: Option<[u32; 3]>,
-    static_local_size: usize,
-    arguments: Vec<Option<KernelArgument>>,
-}
-
-pub struct Launch {
-    module: Arc<bitcode::Module>,
-    function: bitcode::Id,
-    context: ContextId,
-    arguments: Vec<KernelArgument>,
-    local_offsets: Vec<usize>,
-    arena: usize,
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct Geometry {
     pub dimensions: u32,
@@ -2237,13 +2231,27 @@ fn divide(global: [u64; 3], dimensions: u32) -> [u64; 3] {
     local
 }
 
+pub struct Kernel {
+    reference_count: u32,
+    context: ContextId,
+    program: ProgramId,
+    name: String,
+    module: Arc<bitcode::Module>,
+    function: bitcode::Id,
+    signature: Vec<ArgumentKind>,
+    required_work_group_size: Option<[u32; 3]>,
+    local_variables: Arc<Vec<Option<u64>>>,
+    local_storage: address::Storage,
+    arguments: Vec<Option<KernelArgument>>,
+}
+
 impl Kernel {
     pub fn create(program: ProgramId, name: String) -> Result<KernelId> {
         let (module, function, required_work_group_size) = Program::entry(program, &name)?;
         let signature = Self::signature(&module, function)?;
         let context = Program::context(program)?;
-        let static_local =
-            interpreter::local_memory_size(&module).map_err(|_| Error::InvalidKernelDefinition)?;
+        let (local_variables, local_storage) =
+            interpreter::local_layout(&module).map_err(|_| Error::InvalidKernelDefinition)?;
 
         Program::retain(program)?;
         Program::attach(program)?;
@@ -2262,7 +2270,8 @@ impl Kernel {
                 function,
                 signature,
                 required_work_group_size,
-                static_local_size: static_local,
+                local_variables,
+                local_storage,
                 arguments,
             },
         );
@@ -2429,10 +2438,10 @@ impl Kernel {
                 _ => None,
             })
             .sum::<usize>()
-            + self.static_local_size
+            + self.local_storage.capacity()
     }
 
-    fn snapshot(id: KernelId) -> Result<(Launch, Option<[u32; 3]>, ContextId)> {
+    fn snapshot(id: KernelId) -> Result<(Launch, Option<[u32; 3]>)> {
         let kernels = KERNELS.lock().expect("kernels");
         let kernel = kernels.get(&id).ok_or(Error::InvalidKernel)?;
 
@@ -2443,19 +2452,17 @@ impl Kernel {
             .collect::<Option<Vec<KernelArgument>>>()
             .ok_or(Error::InvalidKernelArgs)?;
 
-        let mut arena = align_up(kernel.static_local_size);
-        let local_offsets = arguments
+        let local_variables = Arc::clone(&kernel.local_variables);
+        let mut local_storage = kernel.local_storage.clone();
+        let local_arg_addresses = arguments
             .iter()
             .map(|argument| match argument {
-                KernelArgument::Local(size) => {
-                    let offset = arena;
-                    arena += align_up(*size);
-
-                    offset
-                }
-                _ => 0,
+                KernelArgument::Local(size) => local_storage
+                    .allocate(align_up(*size), Device::MEM_BASE_ADDR_ALIGN)
+                    .ok_or(Error::OutOfResources),
+                _ => Ok(0),
             })
-            .collect();
+            .collect::<Result<Vec<u64>>>()?;
 
         Ok((
             Launch {
@@ -2463,142 +2470,240 @@ impl Kernel {
                 function: kernel.function,
                 context: kernel.context,
                 arguments,
-                local_offsets,
-                arena,
+                local_arg_addresses,
+                local_variables,
+                local_storage,
             },
             kernel.required_work_group_size,
-            kernel.context,
         ))
     }
 }
 
-struct Bound {
-    base: u64,
-    size: u64,
+enum Serviced {
+    Reply(interpreter::Resume),
+    Parked {
+        execution_scope: u64,
+        semantics: bitcode::MemorySemantics,
+    },
+}
+
+struct GroupRunContext<'a> {
+    geometry: &'a Grid,
+    group: [u64; 3],
+    arguments: &'a [interpreter::Argument],
+    global_storage: &'a mut address::UnsafeSharedRawPtrStorage<detectors::Permissions>,
+    local_storage: &'a mut address::Storage,
+    races: &'a mut detectors::RaceDetector,
+    checks: detectors::Checks,
+}
+
+pub struct Launch {
+    module: Arc<bitcode::Module>,
+    function: bitcode::Id,
+    context: ContextId,
+    arguments: Vec<KernelArgument>,
+    local_arg_addresses: Vec<u64>,
+    local_variables: Arc<Vec<Option<u64>>>,
+    local_storage: address::Storage,
 }
 
 impl Launch {
     fn run(&self, geometry: &Grid) -> Result<()> {
-        let (arguments, bounds) = self.bind()?;
+        let (arguments, mut global_storage) = self.bind()?;
         let group_counts = geometry.work_group_count();
-        let mut arena = vec![0u8; self.arena];
+        let mut local_storage = self.local_storage.clone();
+
+        let checks = detectors::Checks::from_env()?;
+        let mut races = detectors::RaceDetector::new(checks, geometry.work_group_size());
+
+        let mut ctx = GroupRunContext {
+            geometry,
+            group: [0, 0, 0],
+            arguments: &arguments,
+            global_storage: &mut global_storage,
+            local_storage: &mut local_storage,
+            races: &mut races,
+            checks,
+        };
 
         for z in 0..group_counts[2] {
             for y in 0..group_counts[1] {
                 for x in 0..group_counts[0] {
-                    arena.fill(0);
-                    self.run_group(geometry, [x, y, z], &arguments, &bounds, &mut arena)?;
+                    ctx.local_storage.zero();
+                    ctx.group = [x, y, z];
+
+                    self.run_group(&mut ctx)?;
                 }
             }
         }
 
+        ctx.races.end_kernel();
+
         Ok(())
     }
 
-    fn bind(&self) -> Result<(Vec<interpreter::Argument>, Vec<Bound>)> {
+    fn bind(
+        &self,
+    ) -> Result<(
+        Vec<interpreter::Argument>,
+        address::UnsafeSharedRawPtrStorage<detectors::Permissions>,
+    )> {
+        fn permissions(buffer: &Buffer) -> detectors::Permissions {
+            detectors::Permissions {
+                reads: buffer.flags.access != Access::WriteOnly,
+                writes: buffer.flags.access != Access::ReadOnly,
+                mappings: buffer
+                    .maps
+                    .iter()
+                    .map(|(at, size, flags)| detectors::Mapping {
+                        at: *at,
+                        size: *size,
+                        writable: flags.writes(),
+                    })
+                    .collect(),
+            }
+        }
+
         let mut buffers = BUFFERS.lock().expect("buffers");
-        let mut bounds = Vec::new();
+        let mut global_storage = address::UnsafeSharedRawPtrStorage::new(address::Region::Global);
 
         let arguments = self
             .arguments
             .iter()
-            .zip(&self.local_offsets)
-            .map(|(argument, offset)| {
+            .zip(&self.local_arg_addresses)
+            .map(|(argument, local_address)| {
                 Ok(match argument {
                     KernelArgument::Memory(None) => interpreter::Argument::Buffer(0),
                     KernelArgument::Memory(Some(id)) => {
                         let buffer = buffers.get_mut(id).ok_or(Error::InvalidMemObject)?;
-                        let base = buffer.base().as_ptr() as u64;
+                        let address = unsafe {
+                            global_storage.borrow(
+                                buffer.base().as_ptr(),
+                                buffer.size as u64,
+                                permissions(buffer),
+                            )
+                        }
+                        .ok_or(Error::OutOfResources)?;
 
-                        bounds.push(Bound { base, size: buffer.size as u64 });
-
-                        interpreter::Argument::Buffer(base)
+                        interpreter::Argument::Buffer(address)
                     }
-                    KernelArgument::Local(_) => interpreter::Argument::Buffer(*offset as u64),
+                    KernelArgument::Local(_) => interpreter::Argument::Buffer(*local_address),
                     KernelArgument::Value(bytes) => interpreter::Argument::Value(bytes.clone()),
                 })
             })
             .collect::<Result<Vec<interpreter::Argument>>>()?;
 
-        Ok((arguments, bounds))
+        Ok((arguments, global_storage))
     }
 
-    fn run_group(
-        &self,
-        geometry: &Grid,
-        group: [u64; 3],
-        arguments: &[interpreter::Argument],
-        bounds: &[Bound],
-        arena: &mut [u8],
-    ) -> Result<()> {
-        let work_group_size = geometry.work_group_size();
+    fn run_group(&self, ctx: &mut GroupRunContext<'_>) -> Result<()> {
+        let work_group_size = ctx.geometry.work_group_size();
+
+        ctx.races.begin_group(ctx.group);
 
         let mut items = (0..work_group_size)
             .map(|_| {
                 interpreter::Interpreter::new(
                     Arc::clone(&self.module),
                     self.function,
-                    arguments,
+                    ctx.arguments,
+                    Arc::clone(&self.local_variables),
                     FUEL,
                     false,
+                    ctx.checks,
                 )
                 .map_err(trap)
             })
             .collect::<Result<Vec<interpreter::Interpreter>>>()?;
 
-        let mut replies: Vec<Option<interpreter::Resume>> =
-            vec![Some(interpreter::Resume::Start); work_group_size];
-        let mut parked = vec![false; work_group_size];
+        let mut barriers = detectors::BarrierDetector::new(ctx.checks, work_group_size);
 
-        loop {
-            let mut progressed = false;
+        for (lane, item) in items.iter_mut().enumerate() {
+            self.run_item(ctx, item, &mut barriers, lane, interpreter::Resume::Start)?;
+        }
 
-            for lane in 0..work_group_size {
-                let Some(mut reply) = replies[lane].take() else {
-                    continue;
-                };
+        while barriers.waiting() != 0 {
+            if let Some(diagnostic) = barriers.released() {
+                self.report(diagnostic);
+            }
 
-                progressed = true;
-
-                loop {
-                    let outcome = match items[lane].resume(reply) {
-                        Ok(outcome) => outcome,
-                        Err(error) => return Err(self.trapped(items[lane].location(), error)),
-                    };
-
-                    match outcome {
-                        None => break,
-                        Some(interpreter::YieldReason::ControlBarrier { .. }) => {
-                            parked[lane] = true;
-                            break;
-                        }
-                        Some(reason) => {
-                            reply = match service(reason, geometry, group, lane, bounds, arena) {
-                                Ok(reply) => reply,
-                                Err(error) => {
-                                    return Err(self.faulted(items[lane].location(), error));
-                                }
-                            };
-                        }
-                    }
+            if let Some(semantics) = barriers.fold() {
+                for diagnostic in ctx.races.barrier(semantics) {
+                    self.report(diagnostic);
                 }
             }
 
-            if progressed {
-                continue;
-            }
-
-            if !parked.iter().any(|waiting| *waiting) {
-                return Ok(());
-            }
-
-            for lane in 0..work_group_size {
-                if parked[lane] {
-                    parked[lane] = false;
-                    replies[lane] = Some(interpreter::Resume::Ack);
+            for (lane, item) in items.iter_mut().enumerate() {
+                if barriers.release(lane) {
+                    self.run_item(ctx, item, &mut barriers, lane, interpreter::Resume::Ack)?;
                 }
             }
         }
+
+        for diagnostic in ctx.races.end_group() {
+            self.report(diagnostic);
+        }
+
+        Ok(())
+    }
+
+    fn run_item(
+        &self,
+        ctx: &mut GroupRunContext<'_>,
+        item: &mut interpreter::Interpreter,
+        barriers: &mut detectors::BarrierDetector,
+        lane: usize,
+        mut reply: interpreter::Resume,
+    ) -> Result<()> {
+        let entity = entity_of(ctx.geometry, ctx.group, lane);
+
+        loop {
+            let yield_ = match item.resume(reply) {
+                Ok(yield_) => yield_,
+                Err(error) => return Err(self.trapped(item.location(), error)),
+            };
+
+            let Some(reason) = yield_ else {
+                return Ok(());
+            };
+
+            let at = item.location();
+            let mut report = |diagnostics: detectors::DiagnosticList| {
+                for diagnostic in diagnostics {
+                    let diagnostic = match diagnostic.location {
+                        Some(_) => diagnostic,
+                        None => diagnostic.at(at),
+                    };
+
+                    self.report(diagnostic.by(entity));
+                }
+            };
+
+            match service(reason, ctx, entity, at, &mut report) {
+                Ok(Serviced::Parked { execution_scope, semantics }) => {
+                    let reached = detectors::Barrier {
+                        execution_scope,
+                        semantics,
+                        location: item.location(),
+                    };
+
+                    if let Some(diagnostic) = barriers.arrived(entity, reached) {
+                        self.report(diagnostic.by(entity));
+                    }
+
+                    return Ok(());
+                }
+                Ok(Serviced::Reply(next)) => reply = next,
+                Err(error) => return Err(self.faulted(item.location(), error)),
+            }
+        }
+    }
+
+    fn report(&self, diagnostic: detectors::Diagnostic) {
+        let message = format!("{}: {diagnostic}", self.located(diagnostic.location));
+
+        logger::log(&message);
+        Context::report(self.context, &message);
     }
 
     fn trapped(&self, location: Option<bitcode::Location>, error: interpreter::Error) -> Error {
@@ -2640,6 +2745,7 @@ fn trap(error: interpreter::Error) -> Error {
     match error {
         interpreter::Error::OutOfFuel
         | interpreter::Error::OutOfBounds
+        | interpreter::Error::InvalidAddress
         | interpreter::Error::ReadOnlyRegion
         | interpreter::Error::UnsupportedRegion => Error::OutOfResources,
         _ => Error::InvalidProgramExecutable,
@@ -2648,39 +2754,89 @@ fn trap(error: interpreter::Error) -> Error {
 
 fn service(
     reason: interpreter::YieldReason,
-    geometry: &Grid,
-    group: [u64; 3],
-    lane: usize,
-    bounds: &[Bound],
-    arena: &mut [u8],
-) -> Result<interpreter::Resume> {
+    ctx: &mut GroupRunContext<'_>,
+    entity: detectors::Entity,
+    location: Option<bitcode::Location>,
+    report: &mut dyn FnMut(detectors::DiagnosticList),
+) -> Result<Serviced> {
+    let GroupRunContext { geometry, global_storage, local_storage, races, checks, .. } = ctx;
+    let (geometry, checks) = (*geometry, *checks);
+
     Ok(match reason {
         interpreter::YieldReason::Read { address, size } => {
-            within(bounds, address, size)?;
+            let at = detectors::Access::new(address, size, false, false, None);
+            let (bytes, diagnostics) = detectors::checked_buffer_read(
+                global_storage,
+                checks,
+                at,
+                |bytes| -> Result<Vec<u8>> {
+                    races.record(entity, at, &[]);
+                    Ok(bytes.to_vec())
+                },
+                || Ok(vec![0u8; size]),
+            )?;
 
-            let mut bytes = vec![0u8; size];
-            unsafe {
-                core::ptr::copy_nonoverlapping(address as *const u8, bytes.as_mut_ptr(), size);
-            }
+            report(diagnostics);
 
-            interpreter::Resume::Bytes(bytes)
+            Serviced::Reply(interpreter::Resume::Bytes(bytes))
         }
         interpreter::YieldReason::Write { address, bytes } => {
-            within(bounds, address, bytes.len())?;
+            let size = bytes.len();
+            let at = detectors::Access::new(address, size, true, false, None);
+            let (_, diagnostics) = detectors::checked_buffer_write(
+                global_storage,
+                checks,
+                at,
+                |destination| -> Result<()> {
+                    destination.copy_from_slice(&bytes);
+                    races.record(entity, at, &bytes);
 
-            unsafe {
-                core::ptr::copy_nonoverlapping(bytes.as_ptr(), address as *mut u8, bytes.len());
-            }
+                    Ok(())
+                },
+                || Ok(()),
+            )?;
 
-            interpreter::Resume::Ack
+            report(diagnostics);
+
+            Serviced::Reply(interpreter::Resume::Ack)
         }
         interpreter::YieldReason::ReadLocal { address, size } => {
-            interpreter::Resume::Bytes(local_slice(arena, address, size)?.to_vec())
+            let at = detectors::Access::new(address, size, false, false, None);
+            let (read, diagnostics) = detectors::checked_read(
+                local_storage,
+                checks,
+                at,
+                |bytes| -> Result<Vec<u8>> {
+                    races.record(entity, at, &[]);
+
+                    Ok(bytes.to_vec())
+                },
+                || Ok(vec![0u8; size]),
+            )?;
+
+            report(diagnostics);
+
+            Serviced::Reply(interpreter::Resume::Bytes(read))
         }
         interpreter::YieldReason::WriteLocal { address, bytes } => {
-            local_slice(arena, address, bytes.len())?.copy_from_slice(&bytes);
+            let size = bytes.len();
+            let at = detectors::Access::new(address, size, true, false, None);
+            let (_, diagnostics) = detectors::checked_write(
+                local_storage,
+                checks,
+                at,
+                |destination| -> Result<()> {
+                    destination.copy_from_slice(&bytes);
+                    races.record(entity, at, &bytes);
 
-            interpreter::Resume::Ack
+                    Ok(())
+                },
+                || Ok(()),
+            )?;
+
+            report(diagnostics);
+
+            Serviced::Reply(interpreter::Resume::Ack)
         }
         interpreter::YieldReason::Atomic {
             operation,
@@ -2691,70 +2847,99 @@ fn service(
             comparator,
         } => {
             let size = width.div_ceil(8) as usize;
-            let mut bytes = [0u8; 8];
+            let at = detectors::Access::new(address, size, true, true, None);
 
-            if local {
-                bytes[..size].copy_from_slice(local_slice(arena, address, size)?);
-            } else {
-                within(bounds, address, size)?;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(address as *const u8, bytes.as_mut_ptr(), size);
+            let update = |destination: &mut [u8]| -> Result<u64> {
+                let mut bytes = [0u8; 8];
+                bytes[..size].copy_from_slice(destination);
+
+                let previous = u64::from_le_bytes(bytes);
+                let updated = apply_atomic(operation, previous, value, comparator, width);
+                let written = updated.to_le_bytes();
+
+                destination.copy_from_slice(&written[..size]);
+
+                let (loads, stores) = atomic_effects(operation, previous, comparator);
+
+                if loads {
+                    races.record(entity, at, &[]);
                 }
-            }
 
-            let previous = u64::from_le_bytes(bytes);
-            let updated = apply(operation, previous, value, comparator, width);
-            let written = updated.to_le_bytes();
-
-            if local {
-                local_slice(arena, address, size)?.copy_from_slice(&written[..size]);
-            } else {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(written.as_ptr(), address as *mut u8, size);
+                if stores {
+                    races.record(entity, at, &written[..size]);
                 }
-            }
 
-            interpreter::Resume::Scalar(previous)
+                Ok(previous)
+            };
+
+            let (previous, diagnostics) = match local {
+                true => detectors::checked_write(local_storage, checks, at, update, || Ok(0))?,
+                false => {
+                    detectors::checked_buffer_write(global_storage, checks, at, update, || Ok(0))?
+                }
+            };
+
+            report(diagnostics);
+
+            Serviced::Reply(interpreter::Resume::Scalar(previous))
         }
-        interpreter::YieldReason::Builtin(kind) => {
-            interpreter::Resume::Builtin(builtin(kind, geometry, group, lane))
+        interpreter::YieldReason::Builtin(kind) => Serviced::Reply(interpreter::Resume::Builtin(
+            builtin(kind, geometry, entity),
+        )),
+        interpreter::YieldReason::ControlBarrier { execution_scope, semantics } => {
+            return Ok(Serviced::Parked { execution_scope, semantics });
         }
-        interpreter::YieldReason::MemoryBarrier { .. }
-        | interpreter::YieldReason::ControlBarrier { .. }
-        | interpreter::YieldReason::Break => interpreter::Resume::Ack,
+        interpreter::YieldReason::Diagnostic(diagnostics) => {
+            report(diagnostics);
+
+            return Ok(Serviced::Reply(interpreter::Resume::Ack));
+        }
+        interpreter::YieldReason::MemoryBarrier { .. } | interpreter::YieldReason::Break => {
+            Serviced::Reply(interpreter::Resume::Ack)
+        }
     })
 }
 
-fn builtin(kind: bitcode::Builtin, geometry: &Grid, group: [u64; 3], lane: usize) -> [u64; 3] {
+fn entity_of(geometry: &Grid, group: [u64; 3], lane: usize) -> detectors::Entity {
     let local = [
         lane as u64 % geometry.local[0],
         (lane as u64 / geometry.local[0]) % geometry.local[1],
         lane as u64 / (geometry.local[0] * geometry.local[1]),
     ];
 
-    match kind {
-        bitcode::Builtin::LocalInvocationId => local,
-        bitcode::Builtin::WorkgroupId => group,
-        bitcode::Builtin::NumWorkgroups => geometry.work_group_count(),
-        bitcode::Builtin::WorkgroupSize => geometry.local,
-        bitcode::Builtin::GlobalOffset => geometry.offset,
-        bitcode::Builtin::GlobalInvocationId => [
+    detectors::Entity {
+        global: [
             geometry.offset[0] + group[0] * geometry.local[0] + local[0],
             geometry.offset[1] + group[1] * geometry.local[1] + local[1],
             geometry.offset[2] + group[2] * geometry.local[2] + local[2],
         ],
+        local,
+        group,
+        lane,
     }
 }
 
-fn within(bounds: &[Bound], address: u64, size: usize) -> Result<()> {
-    bounds
-        .iter()
-        .any(|bound| address >= bound.base && address + size as u64 <= bound.base + bound.size)
-        .then_some(())
-        .ok_or(Error::OutOfResources)
+fn builtin(kind: bitcode::Builtin, geometry: &Grid, entity: detectors::Entity) -> [u64; 3] {
+    match kind {
+        bitcode::Builtin::GlobalInvocationId => entity.global,
+        bitcode::Builtin::LocalInvocationId => entity.local,
+        bitcode::Builtin::WorkgroupId => entity.group,
+        bitcode::Builtin::NumWorkgroups => geometry.work_group_count(),
+        bitcode::Builtin::WorkgroupSize => geometry.local,
+        bitcode::Builtin::GlobalOffset => geometry.offset,
+    }
 }
 
-fn apply(
+fn atomic_effects(operation: interpreter::Atomic, previous: u64, comparator: u64) -> (bool, bool) {
+    match operation {
+        interpreter::Atomic::Load => (true, false),
+        interpreter::Atomic::Store | interpreter::Atomic::Exchange => (false, true),
+        interpreter::Atomic::CompareExchange => (true, previous == comparator),
+        _ => (true, true),
+    }
+}
+
+fn apply_atomic(
     operation: interpreter::Atomic,
     previous: u64,
     value: u64,
@@ -2801,14 +2986,6 @@ fn signed(bits: u64, width: u32) -> i64 {
     let shift = 64 - width.min(64);
 
     ((bits << shift) as i64) >> shift
-}
-
-fn local_slice(arena: &mut [u8], address: u64, size: usize) -> Result<&mut [u8]> {
-    let start = address as usize;
-
-    arena
-        .get_mut(start..start + size)
-        .ok_or(Error::OutOfResources)
 }
 
 pub struct Buffer {

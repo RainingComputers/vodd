@@ -4,11 +4,14 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::too_many_arguments)]
 
+pub mod address;
 pub mod bitcode;
 pub mod compiler;
 pub mod consts;
+pub mod detectors;
 pub mod ffi;
 pub mod interpreter;
+pub mod logger;
 pub mod parser;
 pub mod platform;
 pub mod sys;
