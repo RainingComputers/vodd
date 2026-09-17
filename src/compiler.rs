@@ -13,14 +13,22 @@ const TRANSLATORS: &[&str] = &[
     "/opt/homebrew/opt/spirv-llvm-translator/bin/llvm-spirv",
     "/usr/local/opt/spirv-llvm-translator/bin/llvm-spirv",
     "llvm-spirv",
+    "llvm-spirv-21",
+    "llvm-spirv-20",
 ];
 const COMPILERS: &[&str] = &[
     "/opt/homebrew/opt/llvm/bin/clang",
     "/opt/homebrew/opt/llvm@21/bin/clang",
     "/usr/local/opt/llvm/bin/clang",
     "clang",
+    "clang-21",
+    "clang-20",
+    "clang-19",
+    "clang-18",
 ];
 const SPIRV_VERSION: &str = "1.1";
+const MINIMUM_CLANG: u32 = 18;
+const MINIMUM_TRANSLATOR: u32 = 20;
 const UNUSED: &str = "-Wno-unused-command-line-argument";
 const SUPPLIED: &[&str] = &[
     "atomic_inc",
@@ -148,7 +156,11 @@ pub fn compile(
         false => None,
     };
 
-    let translator = translator();
+    let translator = match backends_spirv(clang) {
+        true => None,
+        false => translator(),
+    };
+
     let produced = scratch.path.join("source.spv");
     let emitted = match translator {
         Some(_) => scratch.path.join("source.bc"),
@@ -255,6 +267,25 @@ pub fn linkable() -> bool {
     linker().is_some()
 }
 
+pub fn requirements() -> String {
+    let clang = CLANG
+        .get()
+        .and_then(|found| found.as_ref())
+        .and_then(major_version);
+
+    let translator = TRANSLATOR
+        .get()
+        .and_then(|found| found.as_ref())
+        .and_then(major_version);
+
+    format!(
+        "clang >= {MINIMUM_CLANG} (found {}) and llvm-spirv >= {MINIMUM_TRANSLATOR} (found {}); \
+         set VODD_CLANG and VODD_LLVM_SPIRV to point at them",
+        describe(clang),
+        describe(translator)
+    )
+}
+
 fn linker() -> Option<&'static PathBuf> {
     LINKER
         .get_or_init(|| {
@@ -282,10 +313,7 @@ fn translator() -> Option<&'static PathBuf> {
                 .into_iter()
                 .chain(TRANSLATORS.iter().map(PathBuf::from))
                 .find(|candidate| {
-                    Command::new(candidate)
-                        .arg("--version")
-                        .output()
-                        .is_ok_and(|output| output.status.success())
+                    major_version(candidate).is_some_and(|major| major >= MINIMUM_TRANSLATOR)
                 })
         })
         .as_ref()
@@ -299,14 +327,61 @@ fn clang() -> Option<&'static PathBuf> {
                 .map(PathBuf::from)
                 .into_iter()
                 .chain(COMPILERS.iter().map(PathBuf::from))
-                .find(targets_spirv)
+                .filter(|candidate| {
+                    major_version(candidate).is_some_and(|major| major >= MINIMUM_CLANG)
+                })
+                .collect::<Vec<PathBuf>>()
+                .into_iter()
+                .fold(None, |chosen, candidate| match chosen {
+                    Some(found) if backends_spirv(&found) => Some(found),
+                    Some(found) if backends_spirv(&candidate) => Some(candidate),
+                    Some(found) => Some(found),
+                    None if targets_spirv(&candidate) => Some(candidate),
+                    None => None,
+                })
         })
         .as_ref()
 }
 
 fn targets_spirv(clang: &PathBuf) -> bool {
+    backends_spirv(clang) || emits_spirv(clang)
+}
+
+fn backends_spirv(clang: &PathBuf) -> bool {
     Command::new(clang)
         .arg("-print-targets")
         .output()
         .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains("spirv64"))
+}
+
+fn emits_spirv(clang: &PathBuf) -> bool {
+    let staged = translator().is_some();
+
+    Command::new(clang)
+        .args(arguments("", staged, None))
+        .args(["-o", "/dev/null", "/dev/null"])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn major_version(tool: &PathBuf) -> Option<u32> {
+    let output = Command::new(tool).arg("--version").output().ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let after = text.split("version").nth(1)?;
+    let digits: String = after
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+
+    digits.parse().ok()
+}
+
+fn describe(major: Option<u32>) -> String {
+    major.map_or_else(|| "none".to_string(), |found| found.to_string())
 }

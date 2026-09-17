@@ -8,6 +8,8 @@ pub mod yaml;
 pub use build::build_driver;
 pub use build::compile_c;
 pub use build::is_current;
+pub use build::library_name;
+pub use build::library_path_variable;
 pub use build::link_arguments;
 pub use build::macos_sdk;
 pub use build::modified;

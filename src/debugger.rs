@@ -474,7 +474,6 @@ struct Session {
     media: hypermedia::Hypermedia<templates::Fragment>,
 }
 
-
 impl Session {
     fn run(mut self, inbox: Receiver<Message>) {
         loop {

@@ -8,8 +8,11 @@ import { dirname, join, resolve } from "node:path";
 const HERE = __dirname;
 const ROOT = resolve(HERE, "../..");
 
+const MACOS = process.platform === "darwin";
+
 const DRIVER = join(ROOT, "target/release");
-const LIBRARY = join(DRIVER, "libvodd.dylib");
+const LIBRARY = join(DRIVER, MACOS ? "libvodd.dylib" : "libvodd.so");
+const LIBRARY_PATH = MACOS ? "DYLD_LIBRARY_PATH" : "LD_LIBRARY_PATH";
 const HOST = join(ROOT, "target/browser/host");
 const SOURCE = join(ROOT, "tests/support/host.c");
 
@@ -52,8 +55,16 @@ function newer(target: string, ...sources: string[]) {
     return sources.every((source) => statSync(source).mtimeMs < made);
 }
 
-function sdk() {
-    return execFileSync("xcrun", ["--show-sdk-path"]).toString().trim();
+function sysroot() {
+    if (!MACOS) return [];
+
+    const path = execFileSync("xcrun", ["--show-sdk-path"]).toString().trim();
+
+    return ["-isysroot", path];
+}
+
+function linking() {
+    return MACOS ? ["-Wl,-undefined,dynamic_lookup"] : [`-Wl,-rpath,${DRIVER}`];
 }
 
 export function build() {
@@ -74,11 +85,10 @@ export function build() {
             "-I",
             join(ROOT, "tests/support/include"),
             "-DCL_TARGET_OPENCL_VERSION=120",
-            "-isysroot",
-            sdk(),
+            ...sysroot(),
             `-L${DRIVER}`,
             "-lvodd",
-            "-Wl,-undefined,dynamic_lookup",
+            ...linking(),
         ]);
     }
 
@@ -145,7 +155,7 @@ export async function launch(options: Options): Promise<Session> {
             cwd: ROOT,
             env: {
                 ...process.env,
-                DYLD_LIBRARY_PATH: DRIVER,
+                [LIBRARY_PATH]: DRIVER,
                 VODD_DEBUG: `127.0.0.1:${port}`,
                 VODD_CHECK: options.checks ?? "all",
                 VODD_MAX_ERRORS: String(options.maxErrors ?? 8),

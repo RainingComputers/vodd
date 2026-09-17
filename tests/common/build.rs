@@ -42,37 +42,63 @@ pub fn build_driver(target: &str) -> Result<String, String> {
 pub fn link_arguments(target: &str, driver: &str) -> Result<Vec<String>, String> {
     if target != VODD {
         let loader = std::env::var("VODD_OPENCL_LOADER")
-            .unwrap_or_else(|_| "/opt/homebrew/opt/opencl-icd-loader".to_string());
+            .ok()
+            .or_else(default_loader);
 
-        return Ok(vec![format!("-L{loader}/lib"), "-lOpenCL".to_string()]);
+        let mut arguments = Vec::new();
+        if let Some(loader) = loader {
+            arguments.push(format!("-L{loader}/lib"));
+        }
+        arguments.push("-lOpenCL".to_string());
+
+        return Ok(arguments);
     }
 
-    let library = Path::new(driver).join("libvodd.dylib");
+    let library = Path::new(driver).join(library_name());
     if !library.exists() {
         return Err(format!(
-            "{} is missing; run: cargo build",
+            "{} is missing; run: cargo build --release",
             library.display()
         ));
     }
 
-    Ok(vec![
-        format!("-L{driver}"),
-        "-lvodd".to_string(),
-        "-Wl,-undefined,dynamic_lookup".to_string(),
-    ])
+    let mut arguments = vec![format!("-L{driver}"), "-lvodd".to_string()];
+
+    match cfg!(target_os = "macos") {
+        true => arguments.push("-Wl,-undefined,dynamic_lookup".to_string()),
+        false => arguments.push(format!("-Wl,-rpath,{}", absolute(driver))),
+    }
+
+    Ok(arguments)
+}
+
+pub fn library_name() -> &'static str {
+    match cfg!(target_os = "macos") {
+        true => "libvodd.dylib",
+        false => "libvodd.so",
+    }
+}
+
+fn default_loader() -> Option<String> {
+    let homebrew = "/opt/homebrew/opt/opencl-icd-loader";
+    match cfg!(target_os = "macos") {
+        true => Some(homebrew.to_string()),
+        false => None,
+    }
 }
 
 pub fn runtime_environment(target: &str, driver: &str) -> Vec<(String, String)> {
-    let library_path = (target == VODD).then(|| {
-        (
-            "DYLD_LIBRARY_PATH".to_string(),
-            std::fs::canonicalize(driver)
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|_| driver.to_string()),
-        )
-    });
+    let library_path =
+        (target == VODD).then(|| (library_path_variable().to_string(), absolute(driver)));
 
     library_path.into_iter().chain(macos_sdk()).collect()
+}
+
+pub fn library_path_variable() -> &'static str {
+    match cfg!(target_os = "macos") {
+        true => "DYLD_LIBRARY_PATH",
+        false => "LD_LIBRARY_PATH",
+    }
 }
 
 pub fn macos_sdk() -> Vec<(String, String)> {
@@ -93,6 +119,12 @@ pub fn macos_sdk() -> Vec<(String, String)> {
         ("SDKROOT".to_string(), sdk.clone()),
         ("LIBRARY_PATH".to_string(), format!("{sdk}/usr/lib")),
     ]
+}
+
+fn absolute(driver: &str) -> String {
+    std::fs::canonicalize(driver)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| driver.to_string())
 }
 
 pub fn is_current(object: &Path, source: &Path) -> bool {

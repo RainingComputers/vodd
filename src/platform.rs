@@ -1606,6 +1606,12 @@ pub enum ProgramBuildInfo {
 
 type Translated = (Vec<u8>, String);
 type Failed = (Error, String);
+type Resolved = (
+    Arc<bitcode::Module>,
+    bitcode::Id,
+    Option<[u32; 3]>,
+    Option<Arc<String>>,
+);
 
 pub struct LinkFailure {
     pub program: Option<ProgramId>,
@@ -1824,15 +1830,7 @@ impl Program {
             .entries()
     }
 
-    fn entry(
-        id: ProgramId,
-        name: &str,
-    ) -> Result<(
-        Arc<bitcode::Module>,
-        bitcode::Id,
-        Option<[u32; 3]>,
-        Option<Arc<String>>,
-    )> {
+    fn entry(id: ProgramId, name: &str) -> Result<Resolved> {
         let programs = PROGRAMS.lock().expect("programs");
         let program = programs.get(&id).ok_or(Error::InvalidProgram)?;
         let module = program
@@ -2135,7 +2133,10 @@ fn compiling(error: compiler::Error) -> Failed {
     match error {
         compiler::Error::Missing => (
             Error::CompilerNotAvailable,
-            "no SPIR-V capable clang was found".to_string(),
+            format!(
+                "no SPIR-V capable toolchain was found; needs {}",
+                compiler::requirements()
+            ),
         ),
         compiler::Error::Spawn => (
             Error::BuildProgramFailure,
