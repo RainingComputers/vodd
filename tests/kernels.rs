@@ -120,18 +120,20 @@ fn run_case(case: &Case, host: &Path, driver: &str) -> Result<(), String> {
     let sink = std::fs::File::create(&output)
         .map_err(|error| format!("creating {}: {error}", output.display()))?;
 
+    let expected: Vec<String> = case
+        .local_memory
+        .map(|size| vec!["--expect-local-memory".to_string(), size.to_string()])
+        .unwrap_or_default();
+
     let mut command = Command::new(host);
     command
+        .args(&expected)
         .arg(&source)
         .arg(&case.entry)
         .arg(&case.global_size)
         .arg(&case.local_size)
         .args(&case.arguments)
         .env("VODD_CHECK", "all")
-        .envs(
-            case.local_memory
-                .map(|size| ("VODD_EXPECT_LOCAL_MEMORY".to_string(), size.to_string())),
-        )
         .env("VODD_LOG", &log)
         .envs(runtime_environment(VODD, driver))
         .stdout(std::process::Stdio::from(sink.try_clone().map_err(
@@ -185,8 +187,8 @@ fn kind_of(line: &str) -> Option<&'static str> {
         ("address is not aligned to", "misaligned"),
         ("atomic on an unsupported width", "atomic_width"),
         ("work-group divergence at a barrier", "barrier_divergence"),
-        ("work-items reached the barrier", "barrier_participation"),
-        ("data race between work-item", "data_race"),
+        ("work items reached the barrier", "barrier_participation"),
+        ("data race between work item", "data_race"),
     ];
 
     KINDS

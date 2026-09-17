@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>vodd</title>
+        <link rel="stylesheet" href="/style.css" />
+    </head>
+    <body>
+        <p class="link mono" role="status">
+            <svg
+                width="13"
+                height="13"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.7"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+            >
+                {{ unplugged | safe }}
+            </svg>
+            Debugger disconnected
+        </p>
+        {{ body | safe }}
+        {{ scripts | safe }}
+    </body>
+</html>

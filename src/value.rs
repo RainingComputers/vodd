@@ -1,3 +1,4 @@
+use crate::address;
 use crate::bitcode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +63,135 @@ impl Value {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reading {
+    Typed(bitcode::Id),
+    Described(bitcode::Encoding),
+    Raw,
+}
+
+impl Reading {
+    pub fn of(type_id: Option<bitcode::Id>, encoding: Option<bitcode::Encoding>) -> Reading {
+        match (type_id, encoding) {
+            (Some(type_id), _) => Reading::Typed(type_id),
+            (None, Some(encoding)) => Reading::Described(encoding),
+            (None, None) => Reading::Raw,
+        }
+    }
+
+    fn encoding(self, module: &bitcode::Module) -> Result<Option<bitcode::Encoding>, Error> {
+        let type_id = match self {
+            Reading::Typed(type_id) => type_id,
+            Reading::Described(encoding) => return Ok(Some(encoding)),
+            Reading::Raw => return Ok(None),
+        };
+
+        Ok(match module.type_(type_id)? {
+            bitcode::Type::Float { .. } => Some(bitcode::Encoding::Float),
+            bitcode::Type::Int { signed: true, .. } => Some(bitcode::Encoding::Signed),
+            bitcode::Type::Int { signed: false, .. } => Some(bitcode::Encoding::Unsigned),
+            bitcode::Type::Bool => Some(bitcode::Encoding::Boolean),
+            _ => None,
+        })
+    }
+
+    fn member(self, module: &bitcode::Module) -> Result<Reading, Error> {
+        let Reading::Typed(type_id) = self else {
+            return Ok(self);
+        };
+
+        Ok(match module.type_(type_id)? {
+            bitcode::Type::Vector { component_type, .. } => Reading::Typed(*component_type),
+            bitcode::Type::Array { element_type, .. } => Reading::Typed(*element_type),
+            _ => Reading::Raw,
+        })
+    }
+}
+
+pub fn describe(module: &bitcode::Module, type_id: bitcode::Id) -> Result<String, Error> {
+    fn integer(width: u32, signed: bool) -> String {
+        let name = match width {
+            8 => "char",
+            16 => "short",
+            32 => "int",
+            64 => "long",
+            _ => return format!("int{width}"),
+        };
+
+        match signed {
+            true => name.to_string(),
+            false => format!("u{name}"),
+        }
+    }
+
+    Ok(match module.type_(type_id)? {
+        bitcode::Type::Void => "void".to_string(),
+        bitcode::Type::Bool => "bool".to_string(),
+        bitcode::Type::Int { width, signed } => integer(*width, *signed),
+        bitcode::Type::Float { width: 64 } => "double".to_string(),
+        bitcode::Type::Float { width: 16 } => "half".to_string(),
+        bitcode::Type::Float { .. } => "float".to_string(),
+        bitcode::Type::Vector { component_type, count } => {
+            format!("{}{count}", describe(module, *component_type)?)
+        }
+        bitcode::Type::Array { element_type, count } => {
+            format!("{}[{count}]", describe(module, *element_type)?)
+        }
+        bitcode::Type::Struct { member_types } => format!("struct of {}", member_types.len()),
+        bitcode::Type::Pointer { pointee_type, .. } => {
+            format!("{} *", describe(module, *pointee_type)?)
+        }
+        bitcode::Type::Function { .. } => "function".to_string(),
+    })
+}
+
+pub fn show(module: &bitcode::Module, reading: Reading, value: &Value) -> Result<String, Error> {
+    fn scalar(bits: u64, width: u32, encoding: Option<bitcode::Encoding>) -> String {
+        fn trim(number: f64) -> String {
+            match number == number.trunc() && number.abs() < 1e15 {
+                true => format!("{number:.1}"),
+                false => format!("{number}"),
+            }
+        }
+
+        fn signed(bits: u64, width: u32) -> i64 {
+            match width >= 64 {
+                true => bits as i64,
+                false => ((bits << (64 - width)) as i64) >> (64 - width),
+            }
+        }
+
+        match (encoding, width) {
+            (Some(bitcode::Encoding::Boolean), _) => (bits != 0).to_string(),
+            (Some(bitcode::Encoding::Float), 32) => trim(f32::from_bits(bits as u32) as f64),
+            (Some(bitcode::Encoding::Float), _) => trim(f64::from_bits(bits)),
+            (Some(bitcode::Encoding::Signed), _) => signed(bits, width).to_string(),
+            (Some(bitcode::Encoding::Address), _) => format!("{bits:#x}"),
+            _ => bits.to_string(),
+        }
+    }
+
+    Ok(match value {
+        Value::Void => "void".to_string(),
+        Value::Bool(flag) => flag.to_string(),
+        Value::Pointer(pointer) => match address::region(pointer.address) {
+            Some(region) => format!("{region} {:#x}", pointer.address),
+            None => format!("{:#x}", pointer.address),
+        },
+        Value::Composite(members) => {
+            let inner = reading.member(module)?;
+
+            let shown = members
+                .iter()
+                .map(|member| show(module, inner, member))
+                .collect::<Result<Vec<String>, Error>>()?;
+
+            format!("({})", shown.join(", "))
+        }
+        Value::Scalar { bits, width } => scalar(*bits, *width, reading.encoding(module)?),
+    })
+}
+
 pub(crate) fn encode(
     module: &bitcode::Module,
     type_id: bitcode::Id,
@@ -103,7 +233,7 @@ pub(crate) fn decode(
     Ok(match module.type_(type_id)? {
         bitcode::Type::Void => Value::Void,
         bitcode::Type::Bool => Value::Bool(*source.first().ok_or(Error::NotEnoughBytes)? != 0),
-        bitcode::Type::Int { width } | bitcode::Type::Float { width } => {
+        bitcode::Type::Int { width, .. } | bitcode::Type::Float { width } => {
             Value::from_bits(bits_from_le(source, (*width as usize).div_ceil(8))?, *width)
         }
         bitcode::Type::Pointer { pointee_type, .. } => Value::Pointer(Pointer {
@@ -190,7 +320,7 @@ pub(crate) fn zeroed(module: &bitcode::Module, type_id: bitcode::Id) -> Result<V
     Ok(match module.type_(type_id)? {
         bitcode::Type::Void => Value::Void,
         bitcode::Type::Bool => Value::Bool(false),
-        bitcode::Type::Int { width } | bitcode::Type::Float { width } => {
+        bitcode::Type::Int { width, .. } | bitcode::Type::Float { width } => {
             Value::from_bits(0, *width)
         }
         bitcode::Type::Pointer { pointee_type, .. } => {

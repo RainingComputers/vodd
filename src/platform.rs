@@ -1,7 +1,9 @@
 use crate::address;
 use crate::bitcode;
 use crate::compiler;
+use crate::debugger;
 use crate::detectors;
+use crate::inspect;
 use crate::interpreter;
 use crate::logger;
 use crate::parser;
@@ -124,6 +126,20 @@ impl From<detectors::EnvError> for Error {
 
 impl From<address::Invalid> for Error {
     fn from(_: address::Invalid) -> Error {
+        Error::OutOfResources
+    }
+}
+
+// TODO: this might be a smell
+impl From<interpreter::Error> for Error {
+    fn from(error: interpreter::Error) -> Error {
+        trap(error)
+    }
+}
+
+// TODO: logging for these error has to go in debugger.rs
+impl From<debugger::Error> for Error {
+    fn from(error: debugger::Error) -> Error {
         Error::OutOfResources
     }
 }
@@ -1404,7 +1420,7 @@ impl CommandQueue {
         command_type: CommandType,
         wait: Vec<EventId>,
     ) -> Result<EventId> {
-        let (launch, required) = Kernel::snapshot(kernel)?;
+        let (snapshot, required) = Kernel::snapshot(kernel)?;
         let grid = geometry.resolve(required);
 
         Self::validate_grid(
@@ -1412,13 +1428,23 @@ impl CommandQueue {
             geometry.local.is_some().then_some(required).flatten(),
         )?;
 
-        if launch.local_storage.capacity() as u64 > LOCAL_MEM_SIZE {
+        if snapshot.local_storage.capacity() as u64 > LOCAL_MEM_SIZE {
             return Err(Error::InvalidWorkGroupSize);
         }
 
-        if Self::context(id)? != launch.context {
+        if Self::context(id)? != snapshot.context {
             return Err(Error::InvalidContext);
         }
+
+        let handle = debugger::Handle::open(
+            &snapshot.name,
+            Arc::clone(&snapshot.module),
+            snapshot.source.clone(),
+            grid.local,
+            grid.work_group_count(),
+        )?;
+
+        let launch = Launch::from_snapshot(snapshot, handle);
 
         Self::enqueue(id, Command::Ndrange { launch, grid }, command_type, wait)
     }
@@ -1801,7 +1827,12 @@ impl Program {
     fn entry(
         id: ProgramId,
         name: &str,
-    ) -> Result<(Arc<bitcode::Module>, bitcode::Id, Option<[u32; 3]>)> {
+    ) -> Result<(
+        Arc<bitcode::Module>,
+        bitcode::Id,
+        Option<[u32; 3]>,
+        Option<Arc<String>>,
+    )> {
         let programs = PROGRAMS.lock().expect("programs");
         let program = programs.get(&id).ok_or(Error::InvalidProgram)?;
         let module = program
@@ -1819,6 +1850,7 @@ impl Program {
             Arc::clone(module),
             entry.function,
             entry.required_local_size,
+            program.source.clone().map(Arc::new),
         ))
     }
 
@@ -2236,6 +2268,7 @@ pub struct Kernel {
     context: ContextId,
     program: ProgramId,
     name: String,
+    source: Option<Arc<String>>,
     module: Arc<bitcode::Module>,
     function: bitcode::Id,
     signature: Vec<ArgumentKind>,
@@ -2247,7 +2280,7 @@ pub struct Kernel {
 
 impl Kernel {
     pub fn create(program: ProgramId, name: String) -> Result<KernelId> {
-        let (module, function, required_work_group_size) = Program::entry(program, &name)?;
+        let (module, function, required_work_group_size, source) = Program::entry(program, &name)?;
         let signature = Self::signature(&module, function)?;
         let context = Program::context(program)?;
         let (local_variables, local_storage) = interpreter::local_layout(&module, function)
@@ -2266,6 +2299,7 @@ impl Kernel {
                 context,
                 program,
                 name,
+                source,
                 module,
                 function,
                 signature,
@@ -2446,7 +2480,7 @@ impl Kernel {
             + self.local_storage.capacity()
     }
 
-    fn snapshot(id: KernelId) -> Result<(Launch, Option<[u32; 3]>)> {
+    fn snapshot(id: KernelId) -> Result<(Snapshot, Option<[u32; 3]>)> {
         let kernels = KERNELS.lock().expect("kernels");
         let kernel = kernels.get(&id).ok_or(Error::InvalidKernel)?;
 
@@ -2470,7 +2504,9 @@ impl Kernel {
             .collect::<Result<Vec<u64>>>()?;
 
         Ok((
-            Launch {
+            Snapshot {
+                name: kernel.name.clone(),
+                source: kernel.source.clone(),
                 module: Arc::clone(&kernel.module),
                 function: kernel.function,
                 context: kernel.context,
@@ -2502,7 +2538,20 @@ struct GroupRunContext<'a> {
     checks: detectors::Checks,
 }
 
+pub struct Snapshot {
+    name: String,
+    source: Option<Arc<String>>,
+    module: Arc<bitcode::Module>,
+    function: bitcode::Id,
+    context: ContextId,
+    arguments: Vec<KernelArgument>,
+    local_arg_addresses: Vec<u64>,
+    local_variables: Arc<Vec<Option<u64>>>,
+    local_storage: address::Storage,
+}
+
 pub struct Launch {
+    handle: debugger::Handle,
     module: Arc<bitcode::Module>,
     function: bitcode::Id,
     context: ContextId,
@@ -2513,6 +2562,19 @@ pub struct Launch {
 }
 
 impl Launch {
+    fn from_snapshot(held: Snapshot, handle: debugger::Handle) -> Launch {
+        Launch {
+            handle,
+            module: held.module,
+            function: held.function,
+            context: held.context,
+            arguments: held.arguments,
+            local_arg_addresses: held.local_arg_addresses,
+            local_variables: held.local_variables,
+            local_storage: held.local_storage,
+        }
+    }
+
     fn run(&self, geometry: &Grid) -> Result<()> {
         let (arguments, mut global_storage) = self.bind()?;
         let group_counts = geometry.work_group_count();
@@ -2531,18 +2593,24 @@ impl Launch {
             checks,
         };
 
-        for z in 0..group_counts[2] {
-            for y in 0..group_counts[1] {
-                for x in 0..group_counts[0] {
-                    ctx.local_storage.zero();
-                    ctx.group = [x, y, z];
+        self.handle.started();
 
-                    self.run_group(&mut ctx)?;
-                }
+        for group in groups(group_counts) {
+            ctx.local_storage.zero();
+            ctx.group = group;
+
+            if let Err(error) = self.run_group(&mut ctx) {
+                self.handle.aborted();
+                ctx.races.end_kernel();
+
+                return Err(error);
             }
         }
 
         ctx.races.end_kernel();
+
+        self.handle.finished();
+        self.handle.rest();
 
         Ok(())
     }
@@ -2603,10 +2671,45 @@ impl Launch {
 
     fn run_group(&self, ctx: &mut GroupRunContext<'_>) -> Result<()> {
         let work_group_size = ctx.geometry.work_group_size();
+        let index = index_of(ctx.geometry.work_group_count(), ctx.group);
 
         ctx.races.begin_group(ctx.group);
 
-        let mut items = (0..work_group_size)
+        let mut items = self.lanes(ctx, work_group_size)?;
+        let mut barriers = detectors::BarrierDetector::new(ctx.checks, work_group_size);
+        let mut progress = vec![inspect::Progress::Fresh; work_group_size];
+
+        self.handle.opened(index, &items, &progress)?;
+
+        loop {
+            if self.advance(ctx, &mut items, &mut barriers, &mut progress)? {
+                self.handle.stepped(index, &items, &progress)?;
+            }
+
+            if progress.iter().any(|held| held.is_ready()) {
+                continue;
+            }
+
+            if barriers.waiting() == 0 || !self.release(ctx, &mut barriers, &mut progress) {
+                break;
+            }
+        }
+
+        for diagnostic in ctx.races.end_group() {
+            self.report(ctx.geometry.work_group_count(), diagnostic, None);
+        }
+
+        self.handle.ended(index, &items, &progress)?;
+
+        Ok(())
+    }
+
+    fn lanes(
+        &self,
+        ctx: &GroupRunContext<'_>,
+        size: usize,
+    ) -> Result<Vec<interpreter::Interpreter>> {
+        (0..size)
             .map(|_| {
                 interpreter::Interpreter::new(
                     Arc::clone(&self.module),
@@ -2614,42 +2717,63 @@ impl Launch {
                     ctx.arguments,
                     Arc::clone(&self.local_variables),
                     FUEL,
-                    false,
+                    self.handle.attached(),
                     ctx.checks,
                 )
                 .map_err(trap)
             })
-            .collect::<Result<Vec<interpreter::Interpreter>>>()?;
+            .collect()
+    }
 
-        let mut barriers = detectors::BarrierDetector::new(ctx.checks, work_group_size);
+    fn advance(
+        &self,
+        ctx: &mut GroupRunContext<'_>,
+        items: &mut [interpreter::Interpreter],
+        barriers: &mut detectors::BarrierDetector,
+        progress: &mut [inspect::Progress],
+    ) -> Result<bool> {
+        let mut ran = false;
 
         for (lane, item) in items.iter_mut().enumerate() {
-            self.run_item(ctx, item, &mut barriers, lane, interpreter::Resume::Start)?;
+            let Some(reply) = progress[lane].resume() else {
+                continue;
+            };
+
+            ran = true;
+            progress[lane] = self.run_item(ctx, item, barriers, lane, reply)?;
         }
 
-        while barriers.waiting() != 0 {
-            if let Some(diagnostic) = barriers.released() {
-                self.report(diagnostic);
-            }
+        Ok(ran)
+    }
 
-            if let Some(semantics) = barriers.fold() {
-                for diagnostic in ctx.races.barrier(semantics) {
-                    self.report(diagnostic);
-                }
-            }
+    fn release(
+        &self,
+        ctx: &mut GroupRunContext<'_>,
+        barriers: &mut detectors::BarrierDetector,
+        progress: &mut [inspect::Progress],
+    ) -> bool {
+        let counts = ctx.geometry.work_group_count();
 
-            for (lane, item) in items.iter_mut().enumerate() {
-                if barriers.release(lane) {
-                    self.run_item(ctx, item, &mut barriers, lane, interpreter::Resume::Ack)?;
-                }
+        if let Some(diagnostic) = barriers.released() {
+            self.report(counts, diagnostic, None);
+        }
+
+        if let Some(semantics) = barriers.fold() {
+            for diagnostic in ctx.races.barrier(semantics) {
+                self.report(counts, diagnostic, None);
             }
         }
 
-        for diagnostic in ctx.races.end_group() {
-            self.report(diagnostic);
+        let mut freed = false;
+
+        for (lane, held) in progress.iter_mut().enumerate() {
+            if barriers.release(lane) {
+                *held = inspect::Progress::Ready;
+                freed = true;
+            }
         }
 
-        Ok(())
+        freed
     }
 
     fn run_item(
@@ -2659,20 +2783,27 @@ impl Launch {
         barriers: &mut detectors::BarrierDetector,
         lane: usize,
         mut reply: interpreter::Resume,
-    ) -> Result<()> {
+    ) -> Result<inspect::Progress> {
         let entity = entity_of(ctx.geometry, ctx.group, lane);
 
         loop {
             let yield_ = match item.resume(reply) {
                 Ok(yield_) => yield_,
+                // TODO: should this even be handled like this
                 Err(error) => return Err(self.trapped(item.location(), error)),
             };
 
-            let Some(reason) = yield_ else {
-                return Ok(());
+            let reason = match yield_ {
+                None => return Ok(inspect::Progress::Done),
+                Some(interpreter::YieldReason::Break) => {
+                    return Ok(inspect::Progress::Ready);
+                }
+                Some(reason) => reason,
             };
 
             let at = item.location();
+            let counts = ctx.geometry.work_group_count();
+
             let mut report = |diagnostics: detectors::DiagnosticList| {
                 for diagnostic in diagnostics {
                     let diagnostic = match diagnostic.location {
@@ -2680,7 +2811,7 @@ impl Launch {
                         None => diagnostic.at(at),
                     };
 
-                    self.report(diagnostic.by(entity));
+                    self.report(counts, diagnostic.by(entity), Some(item));
                 }
             };
 
@@ -2693,10 +2824,10 @@ impl Launch {
                     };
 
                     if let Some(diagnostic) = barriers.arrived(entity, reached) {
-                        self.report(diagnostic.by(entity));
+                        self.report(counts, diagnostic.by(entity), Some(item));
                     }
 
-                    return Ok(());
+                    return Ok(inspect::Progress::Parked);
                 }
                 Ok(Serviced::Reply(next)) => reply = next,
                 Err(error) => return Err(self.faulted(item.location(), error)),
@@ -2704,11 +2835,19 @@ impl Launch {
         }
     }
 
-    fn report(&self, diagnostic: detectors::Diagnostic) {
+    fn report(
+        &self,
+        counts: [u64; 3],
+        diagnostic: detectors::Diagnostic,
+        item: Option<&interpreter::Interpreter>,
+    ) {
         let message = format!("{}: {diagnostic}", self.located(diagnostic.location));
+        let group = index_of(counts, group_of(&diagnostic));
 
         logger::log(&message);
         Context::report(self.context, &message);
+
+        self.handle.report(&diagnostic, item, group);
     }
 
     fn trapped(&self, location: Option<bitcode::Location>, error: interpreter::Error) -> Error {
@@ -2718,6 +2857,8 @@ impl Launch {
             self.context,
             &format!("{origin}: kernel trapped: {error:?}"),
         );
+
+        self.handle.trapped(location, &error);
 
         trap(error)
     }
@@ -2729,6 +2870,8 @@ impl Launch {
             self.context,
             &format!("{origin}: kernel faulted: {error:?}"),
         );
+
+        self.handle.faulted(location, &error);
 
         error
     }
@@ -2746,6 +2889,23 @@ impl Launch {
     }
 }
 
+fn groups(counts: [u64; 3]) -> impl Iterator<Item = [u64; 3]> {
+    (0..counts[2])
+        .flat_map(move |z| (0..counts[1]).flat_map(move |y| (0..counts[0]).map(move |x| [x, y, z])))
+}
+
+fn index_of(counts: [u64; 3], group: [u64; 3]) -> u64 {
+    (group[2] * counts[1] + group[1]) * counts[0] + group[0]
+}
+
+fn group_of(diagnostic: &detectors::Diagnostic) -> [u64; 3] {
+    diagnostic
+        .entity
+        .map(|entity| entity.group)
+        .unwrap_or([0, 0, 0])
+}
+
+// TODO: this function might be a smell
 fn trap(error: interpreter::Error) -> Error {
     match error {
         interpreter::Error::OutOfFuel
@@ -2754,6 +2914,25 @@ fn trap(error: interpreter::Error) -> Error {
         | interpreter::Error::ReadOnlyRegion
         | interpreter::Error::UnsupportedRegion => Error::OutOfResources,
         _ => Error::InvalidProgramExecutable,
+    }
+}
+
+fn entity_of(geometry: &Grid, group: [u64; 3], lane: usize) -> detectors::Entity {
+    let local = [
+        lane as u64 % geometry.local[0],
+        (lane as u64 / geometry.local[0]) % geometry.local[1],
+        lane as u64 / (geometry.local[0] * geometry.local[1]),
+    ];
+
+    detectors::Entity {
+        global: [
+            geometry.offset[0] + group[0] * geometry.local[0] + local[0],
+            geometry.offset[1] + group[1] * geometry.local[1] + local[1],
+            geometry.offset[2] + group[2] * geometry.local[2] + local[2],
+        ],
+        local,
+        group,
+        lane,
     }
 }
 
@@ -2769,7 +2948,7 @@ fn service(
 
     Ok(match reason {
         interpreter::YieldReason::Read { address, size } => {
-            let at = detectors::Access::new(address, size, false, false, None);
+            let at = detectors::Access::new(address, size, false, false, location);
             let (bytes, diagnostics) = detectors::checked_buffer_read(
                 global_storage,
                 checks,
@@ -2787,7 +2966,7 @@ fn service(
         }
         interpreter::YieldReason::Write { address, bytes } => {
             let size = bytes.len();
-            let at = detectors::Access::new(address, size, true, false, None);
+            let at = detectors::Access::new(address, size, true, false, location);
             let (_, diagnostics) = detectors::checked_buffer_write(
                 global_storage,
                 checks,
@@ -2806,7 +2985,7 @@ fn service(
             Serviced::Reply(interpreter::Resume::Ack)
         }
         interpreter::YieldReason::ReadLocal { address, size } => {
-            let at = detectors::Access::new(address, size, false, false, None);
+            let at = detectors::Access::new(address, size, false, false, location);
             let (read, diagnostics) = detectors::checked_read(
                 local_storage,
                 checks,
@@ -2825,7 +3004,7 @@ fn service(
         }
         interpreter::YieldReason::WriteLocal { address, bytes } => {
             let size = bytes.len();
-            let at = detectors::Access::new(address, size, true, false, None);
+            let at = detectors::Access::new(address, size, true, false, location);
             let (_, diagnostics) = detectors::checked_write(
                 local_storage,
                 checks,
@@ -2906,46 +3085,6 @@ fn service(
     })
 }
 
-fn entity_of(geometry: &Grid, group: [u64; 3], lane: usize) -> detectors::Entity {
-    let local = [
-        lane as u64 % geometry.local[0],
-        (lane as u64 / geometry.local[0]) % geometry.local[1],
-        lane as u64 / (geometry.local[0] * geometry.local[1]),
-    ];
-
-    detectors::Entity {
-        global: [
-            geometry.offset[0] + group[0] * geometry.local[0] + local[0],
-            geometry.offset[1] + group[1] * geometry.local[1] + local[1],
-            geometry.offset[2] + group[2] * geometry.local[2] + local[2],
-        ],
-        local,
-        group,
-        lane,
-    }
-}
-
-fn builtin(kind: bitcode::Builtin, geometry: &Grid, entity: detectors::Entity) -> [u64; 3] {
-    match kind {
-        bitcode::Builtin::GlobalInvocationId => entity.global,
-        bitcode::Builtin::LocalInvocationId => entity.local,
-        bitcode::Builtin::WorkgroupId => entity.group,
-        bitcode::Builtin::NumWorkgroups => geometry.work_group_count(),
-        bitcode::Builtin::WorkgroupSize => geometry.local,
-        bitcode::Builtin::GlobalOffset => geometry.offset,
-        bitcode::Builtin::GlobalSize => geometry.global,
-    }
-}
-
-fn atomic_effects(operation: interpreter::Atomic, previous: u64, comparator: u64) -> (bool, bool) {
-    match operation {
-        interpreter::Atomic::Load => (true, false),
-        interpreter::Atomic::Store | interpreter::Atomic::Exchange => (false, true),
-        interpreter::Atomic::CompareExchange => (true, previous == comparator),
-        _ => (true, true),
-    }
-}
-
 fn apply_atomic(
     operation: interpreter::Atomic,
     previous: u64,
@@ -2986,6 +3125,27 @@ fn apply_atomic(
         interpreter::Atomic::And => previous & value,
         interpreter::Atomic::Or => previous | value,
         interpreter::Atomic::Xor => previous ^ value,
+    }
+}
+
+fn atomic_effects(operation: interpreter::Atomic, previous: u64, comparator: u64) -> (bool, bool) {
+    match operation {
+        interpreter::Atomic::Load => (true, false),
+        interpreter::Atomic::Store | interpreter::Atomic::Exchange => (false, true),
+        interpreter::Atomic::CompareExchange => (true, previous == comparator),
+        _ => (true, true),
+    }
+}
+
+fn builtin(kind: bitcode::Builtin, geometry: &Grid, entity: detectors::Entity) -> [u64; 3] {
+    match kind {
+        bitcode::Builtin::GlobalInvocationId => entity.global,
+        bitcode::Builtin::LocalInvocationId => entity.local,
+        bitcode::Builtin::WorkgroupId => entity.group,
+        bitcode::Builtin::NumWorkgroups => geometry.work_group_count(),
+        bitcode::Builtin::WorkgroupSize => geometry.local,
+        bitcode::Builtin::GlobalOffset => geometry.offset,
+        bitcode::Builtin::GlobalSize => geometry.global,
     }
 }
 
@@ -3566,6 +3726,7 @@ fn run_worker() {
         let generation = progress();
 
         if SHUTDOWN.load(Ordering::Relaxed) {
+            debugger::Handle::linger();
             return;
         }
 

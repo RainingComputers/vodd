@@ -10,3 +10,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dev-dependencies]
 yaml-rust2 = "0.10"
+
+[dependencies]
+minijinja = "2.24.0"
+serde = { version = "1.0.229", features = ["derive"] }
+syntect = { version = "5.3.0", default-features = false, features = ["html", "regex-fancy", "default-syntaxes"] }
+tiny_http = "0.12.0"

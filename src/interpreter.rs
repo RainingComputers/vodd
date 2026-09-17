@@ -118,6 +118,21 @@ pub enum Resume {
     Ack,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Called {
+    pub name: String,
+    pub at: Option<bitcode::Location>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Binding {
+    pub name: String,
+    pub line: u32,
+    pub type_name: String,
+    pub value: Option<String>,
+    pub pointer: bool,
+}
+
 #[derive(Debug, Clone)]
 struct Frame {
     function: bitcode::Id,
@@ -360,6 +375,93 @@ impl Interpreter {
         self.location
     }
 
+    pub fn locals(&self) -> Result<Vec<Binding>, Error> {
+        let Ok(frame) = self.frame() else {
+            return Ok(Vec::new());
+        };
+
+        let function = self.module.function(frame.function)?;
+        let mut out: Vec<Binding> = Vec::new();
+
+        for local in &function.locals {
+            let Some(Some(bound)) = frame.values.get(local.slot as usize) else {
+                continue;
+            };
+
+            let (value, pointee) = match local.indirect {
+                false => (Some(bound.clone()), None),
+                true => match bound.as_pointer() {
+                    Ok(pointer) => (self.peek(pointer), Some(pointer.pointee_type)),
+                    Err(_) => continue,
+                },
+            };
+
+            let type_name = match (&local.basic, pointee) {
+                (Some(basic), _) => basic.name.clone(),
+                (None, Some(type_id)) => value::describe(&self.module, type_id)?,
+                (None, None) => String::new(),
+            };
+
+            let reading =
+                value::Reading::of(pointee, local.basic.as_ref().map(|kind| kind.encoding));
+
+            let binding = Binding {
+                name: local.name.clone(),
+                line: local.line,
+                type_name,
+                value: match &value {
+                    Some(value) => Some(value::show(&self.module, reading, value)?),
+                    None => None,
+                },
+                pointer: matches!(value, Some(value::Value::Pointer(_))),
+            };
+
+            match out.iter_mut().find(|slot| slot.name == binding.name) {
+                Some(slot) => *slot = binding,
+                None => out.push(binding),
+            }
+        }
+
+        Ok(out)
+    }
+
+    fn peek(&self, pointer: value::Pointer) -> Option<value::Value> {
+        let size = self.module.layout(pointer.pointee_type).ok()?.size;
+
+        let source = match address::region(pointer.address) {
+            Some(address::Region::Invocation) => &self.storage,
+            Some(address::Region::Mutable) => &self.mutable_storage,
+            Some(address::Region::Constant) => &self.constant_storage,
+            _ => return None,
+        };
+
+        let bytes = source.read(pointer.address, size).ok()?;
+
+        value::decode(&self.module, pointer.pointee_type, bytes).ok()
+    }
+
+    pub fn stack(&self) -> Vec<Called> {
+        let wrapper = usize::from(self.frames.len() > 1);
+
+        self.frames
+            .iter()
+            .skip(wrapper)
+            .rev()
+            .map(|frame| {
+                let held = self.module.function(frame.function).ok();
+
+                Called {
+                    name: held
+                        .map(|function| function.name.clone())
+                        .unwrap_or_default(),
+                    at: held
+                        .and_then(|function| function.block(frame.block).ok())
+                        .and_then(|block| block.line(frame.instruction)),
+                }
+            })
+            .collect()
+    }
+
     pub fn resume(&mut self, resume: Resume) -> Result<Option<YieldReason>, Error> {
         let mut resume = match (self.pending.take(), resume) {
             (None, Resume::Start) => None,
@@ -395,6 +497,7 @@ impl Interpreter {
         let function = self.module.function(frame.function)?;
         let block = function.block(frame.block)?;
         let line = block.line(frame.instruction);
+        let prologue = line.is_some_and(|location| function.prologue.contains(&location.line));
 
         self.location = line;
 
@@ -402,6 +505,7 @@ impl Interpreter {
 
         if self.debug
             && !self.stepped
+            && !prologue
             && resume.is_none()
             && arrived.is_some()
             && arrived != self.broke_at
@@ -601,7 +705,8 @@ impl Interpreter {
                                     .yield_(YieldReason::ReadLocal { address, size: count });
                             }
                             _ => {
-                                let (bytes, diagnostics) = self.read_bytes(origin, count)?;
+                                let (bytes, diagnostics) =
+                                    self.read_internal_bytes(origin, count)?;
 
                                 return self.copy_out(destination, &bytes, diagnostics);
                             }
@@ -988,6 +1093,34 @@ impl Interpreter {
         Ok(None)
     }
 
+    fn copy_out(
+        &mut self,
+        destination: value::Pointer,
+        bytes: &[u8],
+        mut carried: detectors::DiagnosticList,
+    ) -> Result<Option<YieldReason>, Error> {
+        let address = destination.address;
+
+        match address::region(address) {
+            Some(address::Region::Global) | None => {
+                self.yield_(YieldReason::Write { address, bytes: bytes.to_vec() })
+            }
+            Some(address::Region::Local) => {
+                self.yield_(YieldReason::WriteLocal { address, bytes: bytes.to_vec() })
+            }
+            Some(address::Region::Constant) | Some(address::Region::Builtin) => {
+                Err(Error::ReadOnlyRegion)
+            }
+            _ => {
+                carried.extend(self.write_internal_bytes(destination, bytes)?);
+
+                self.advance()?;
+
+                self.yield_diagnostics(carried)
+            }
+        }
+    }
+
     fn yield_(&mut self, reason: YieldReason) -> Result<Option<YieldReason>, Error> {
         self.pending = Some(reason.clone());
         Ok(Some(reason))
@@ -1141,7 +1274,7 @@ impl Interpreter {
         Ok(())
     }
 
-    fn read_bytes(
+    fn read_internal_bytes(
         &mut self,
         pointer: value::Pointer,
         size: usize,
@@ -1166,35 +1299,7 @@ impl Interpreter {
         )
     }
 
-    fn copy_out(
-        &mut self,
-        destination: value::Pointer,
-        bytes: &[u8],
-        mut carried: detectors::DiagnosticList,
-    ) -> Result<Option<YieldReason>, Error> {
-        let address = destination.address;
-
-        match address::region(address) {
-            Some(address::Region::Global) | None => {
-                self.yield_(YieldReason::Write { address, bytes: bytes.to_vec() })
-            }
-            Some(address::Region::Local) => {
-                self.yield_(YieldReason::WriteLocal { address, bytes: bytes.to_vec() })
-            }
-            Some(address::Region::Constant) | Some(address::Region::Builtin) => {
-                Err(Error::ReadOnlyRegion)
-            }
-            _ => {
-                carried.extend(self.write_bytes(destination, bytes)?);
-
-                self.advance()?;
-
-                self.yield_diagnostics(carried)
-            }
-        }
-    }
-
-    fn write_bytes(
+    fn write_internal_bytes(
         &mut self,
         pointer: value::Pointer,
         bytes: &[u8],
@@ -1247,7 +1352,7 @@ impl Interpreter {
             _ => return Err(Error::UnsupportedRegion),
         };
 
-        let (value, diagnostics) = detectors::checked_read(
+        detectors::checked_read(
             source,
             *checks,
             detectors::Access::new(pointer.address, size, false, false, *location),
@@ -1255,9 +1360,7 @@ impl Interpreter {
                 Ok(value::decode(module, pointer.pointee_type, bytes)?)
             },
             || -> Result<value::Value, Error> { Ok(value::zeroed(module, pointer.pointee_type)?) },
-        )?;
-
-        Ok((value, diagnostics))
+        )
     }
 
     fn write_internal(

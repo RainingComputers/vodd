@@ -1,0 +1,49 @@
+<figure class="widget source" {% if id %}id="{{ id }}"{% endif %}>
+    <figcaption>
+        <span class="what"> Source </span>
+        <span class="note mono"> {{ file }} </span>
+    </figcaption>
+    <div class="controls across wrap">
+        <div class="transport">
+            {%- for row in controls.commands %}
+                <button
+                    class="key {{ row.control }}"
+                    title="{{ row.label }}"
+                    aria-label="{{ row.label }}"
+                    data-post="/control"
+                    data-send="{{ row.send }}"
+                    {% if not row.enabled %}disabled{% endif %}
+                >
+                    <svg
+                        viewBox="0 0 16 16"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.7"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                    >
+                        {{ row.icon | safe }}
+                    </svg>
+                </button>
+            {%- endfor %}
+        </div>
+        <span class="stance mono {{ controls.state }}"> {{ controls.state_label }} </span>
+    </div>
+    <div class="code mono">
+        {%- for row in rows %}
+            {%- if row.gap > 0 %}
+                <div class="elided">{{ row.gap }} lines not shown</div>
+            {%- endif %}
+            <div class="ln {{ row.mark }} {% if row.stop %}stop{% endif %}">
+                <button
+                    data-post="/breakpoint"
+                    data-send="line={{ row.number }}"
+                    title="Toggle a breakpoint on line {{ row.number }}"
+                >
+                    {{ row.number }}</button
+                ><code>{{ row.body | safe }}</code>
+            </div>
+        {%- endfor %}
+    </div>
+</figure>

@@ -2,7 +2,13 @@ use crate::bitcode;
 
 const MAGIC: u32 = 0x0723_0203;
 const MEMORY_ALIGNED: u32 = 0x2;
+const DEBUG_TYPE_BASIC: u32 = 2;
+const DEBUG_FUNCTION: u32 = 20;
+const DEBUG_LOCAL_VARIABLE: u32 = 26;
+const DEBUG_DECLARE: u32 = 28;
+const DEBUG_VALUE: u32 = 29;
 const DEBUG_SOURCE: u32 = 35;
+const DEBUG_FUNCTION_DEFINITION: u32 = 101;
 const DEBUG_LINE: u32 = 103;
 const DEBUG_NO_LINE: u32 = 104;
 const DEBUG_SETS: &[&str] = &[
@@ -101,8 +107,7 @@ fn parse_inner(words: impl IntoIterator<Item = u32>) -> Result<bitcode::Module, 
     let mut dec_groups: Vec<(bitcode::Id, Vec<bitcode::Id>)> = Vec::new();
     let mut pending_function: Option<bitcode::Function> = None;
     let mut pending_block: Option<bitcode::Block> = None;
-    let mut debug_sets: Vec<bitcode::Id> = Vec::new();
-    let mut debug_files: Vec<Option<bitcode::Id>> = vec![None; bound];
+    let mut debug = Debug::from_bound(bound);
     let mut current_line: Option<bitcode::Location> = None;
 
     while let Some(header) = words.next() {
@@ -131,7 +136,7 @@ fn parse_inner(words: impl IntoIterator<Item = u32>) -> Result<bitcode::Module, 
                 if name == "OpenCL.std" {
                     module.set_opencl_std(result);
                 } else if DEBUG_SETS.contains(&name.as_str()) {
-                    debug_sets.push(result);
+                    debug.sets.push(result);
                 }
             }
             12 => {
@@ -141,21 +146,16 @@ fn parse_inner(words: impl IntoIterator<Item = u32>) -> Result<bitcode::Module, 
                 let instruction = reader.word()?;
                 let operands = reader.rest();
 
-                if debug_sets.contains(&set) {
-                    match instruction {
-                        DEBUG_SOURCE => {
-                            if let (Some(file), Some(slot)) =
-                                (operands.first(), debug_files.get_mut(result as usize))
-                            {
-                                *slot = Some(*file);
-                            }
-                        }
-                        DEBUG_LINE => {
-                            current_line = debug_location(&module, &debug_files, &operands)?;
-                        }
-                        DEBUG_NO_LINE => current_line = None,
-                        _ => {}
-                    }
+                if debug.owns(set) {
+                    parse_debug(
+                        &module,
+                        &mut debug,
+                        pending_function.as_mut(),
+                        &mut current_line,
+                        result,
+                        instruction,
+                        &operands,
+                    )?;
                 } else if let Some(block) = pending_block.as_mut() {
                     block.push(
                         bitcode::Instruction::ExtInst {
@@ -226,8 +226,8 @@ fn parse_inner(words: impl IntoIterator<Item = u32>) -> Result<bitcode::Module, 
             21 => {
                 let result = reader.word()?;
                 let width = reader.word()?;
-                let _signedness = reader.word()?;
-                module.set_type(result, bitcode::Type::Int { width })?;
+                let signed = reader.word()? != 0;
+                module.set_type(result, bitcode::Type::Int { width, signed })?;
             }
             22 => {
                 let result = reader.word()?;
@@ -320,6 +320,9 @@ fn parse_inner(words: impl IntoIterator<Item = u32>) -> Result<bitcode::Module, 
                     parameters: Vec::new(),
                     blocks: Vec::new(),
                     block_of_label: vec![None; bound],
+                    locals: Vec::new(),
+                    prologue: Vec::new(),
+                    name: String::new(),
                 });
             }
             55 => {
@@ -393,6 +396,129 @@ fn parse_inner(words: impl IntoIterator<Item = u32>) -> Result<bitcode::Module, 
     Ok(module.finalize())
 }
 
+#[derive(Clone)]
+struct Described {
+    name: String,
+    prologue: Vec<u32>,
+}
+
+struct Debug {
+    sets: Vec<bitcode::Id>,
+    files: Vec<Option<bitcode::Id>>,
+    basics: Vec<Option<bitcode::Basic>>,
+    locals: Vec<Option<bitcode::Local>>,
+    described: Vec<Option<Described>>,
+}
+
+impl Debug {
+    fn from_bound(bound: usize) -> Debug {
+        Debug {
+            sets: Vec::new(),
+            files: vec![None; bound],
+            basics: vec![None; bound],
+            locals: vec![None; bound],
+            described: vec![None; bound],
+        }
+    }
+
+    fn owns(&self, set: bitcode::Id) -> bool {
+        self.sets.contains(&set)
+    }
+}
+
+fn parse_debug(
+    module: &bitcode::ModuleBuilder,
+    debug: &mut Debug,
+    function: Option<&mut bitcode::Function>,
+    line: &mut Option<bitcode::Location>,
+    result: bitcode::Id,
+    instruction: u32,
+    operands: &[bitcode::Id],
+) -> Result<(), bitcode::Error> {
+    match instruction {
+        DEBUG_SOURCE => {
+            if let (Some(file), Some(slot)) =
+                (operands.first(), debug.files.get_mut(result as usize))
+            {
+                *slot = Some(*file);
+            }
+        }
+        DEBUG_FUNCTION => {
+            if let (Some(name), Some(declared), Some(scope), Some(slot)) = (
+                operands.first(),
+                operands.get(3),
+                operands.get(8),
+                debug.described.get_mut(result as usize),
+            ) {
+                let declared = literal(module, *declared)?;
+                let scope = literal(module, *scope)?.max(declared);
+
+                *slot = Some(Described {
+                    name: module.string(*name).unwrap_or_default().to_string(),
+                    prologue: (declared..=scope).collect(),
+                });
+            }
+        }
+        DEBUG_FUNCTION_DEFINITION => {
+            if let (Some(described), Some(function)) = (operands.first(), function)
+                && let Some(Some(held)) = debug.described.get(*described as usize)
+            {
+                function.name = held.name.clone();
+                function.prologue = held.prologue.clone();
+            }
+        }
+        DEBUG_LINE => *line = debug_location(module, &debug.files, operands)?,
+        DEBUG_NO_LINE => *line = None,
+        DEBUG_TYPE_BASIC => {
+            if let (Some(name), Some(encoding), Some(slot)) = (
+                operands.first(),
+                operands.get(2),
+                debug.basics.get_mut(result as usize),
+            ) {
+                *slot = Some(bitcode::Basic {
+                    name: module.string(*name).unwrap_or_default().to_string(),
+                    encoding: bitcode::Encoding::from_word(literal(module, *encoding)?),
+                });
+            }
+        }
+        DEBUG_LOCAL_VARIABLE => {
+            let held = match (operands.first(), operands.get(1), operands.get(3)) {
+                (Some(name), Some(kind), Some(at)) => Some(bitcode::Local {
+                    name: module.string(*name).unwrap_or_default().to_string(),
+                    line: literal(module, *at).unwrap_or(0),
+                    slot: 0,
+                    indirect: false,
+                    basic: debug
+                        .basics
+                        .get(*kind as usize)
+                        .cloned()
+                        .unwrap_or_default(),
+                }),
+                _ => None,
+            };
+
+            if let (Some(held), Some(slot)) = (held, debug.locals.get_mut(result as usize)) {
+                *slot = Some(held);
+            }
+        }
+        DEBUG_DECLARE | DEBUG_VALUE => {
+            if let (Some(variable), Some(held), Some(function)) =
+                (operands.first(), operands.get(1), function)
+                && let Some(Some(local)) = debug.locals.get(*variable as usize)
+            {
+                function.locals.push(bitcode::Local {
+                    slot: *held,
+                    indirect: instruction == DEBUG_DECLARE,
+                    ..local.clone()
+                });
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
 fn parse_decoration<I: Iterator<Item = u32>>(
     reader: &mut Reader<'_, I>,
 ) -> Result<bitcode::Decoration, bitcode::Error> {
@@ -410,136 +536,6 @@ fn parse_decoration<I: Iterator<Item = u32>>(
         44 => bitcode::Decoration::Alignment(reader.word()?),
         _ => bitcode::Decoration::Ignored,
     })
-}
-
-fn unary_op(opcode: u16) -> Option<bitcode::UnaryOp> {
-    Some(match opcode {
-        126 => bitcode::UnaryOp::SNegate,
-        127 => bitcode::UnaryOp::FNegate,
-        168 => bitcode::UnaryOp::LogicalNot,
-        200 => bitcode::UnaryOp::Not,
-        _ => return None,
-    })
-}
-
-fn binary_op(opcode: u16) -> Option<bitcode::BinaryOp> {
-    Some(match opcode {
-        128 => bitcode::BinaryOp::IAdd,
-        129 => bitcode::BinaryOp::FAdd,
-        130 => bitcode::BinaryOp::ISub,
-        131 => bitcode::BinaryOp::FSub,
-        132 => bitcode::BinaryOp::IMul,
-        133 => bitcode::BinaryOp::FMul,
-        134 => bitcode::BinaryOp::UDiv,
-        135 => bitcode::BinaryOp::SDiv,
-        136 => bitcode::BinaryOp::FDiv,
-        137 => bitcode::BinaryOp::UMod,
-        138 => bitcode::BinaryOp::SRem,
-        139 => bitcode::BinaryOp::SMod,
-        140 => bitcode::BinaryOp::FRem,
-        141 => bitcode::BinaryOp::FMod,
-        164 => bitcode::BinaryOp::LogicalEqual,
-        165 => bitcode::BinaryOp::LogicalNotEqual,
-        166 => bitcode::BinaryOp::LogicalOr,
-        167 => bitcode::BinaryOp::LogicalAnd,
-        170 => bitcode::BinaryOp::IEqual,
-        171 => bitcode::BinaryOp::INotEqual,
-        172 => bitcode::BinaryOp::UGreaterThan,
-        173 => bitcode::BinaryOp::SGreaterThan,
-        174 => bitcode::BinaryOp::UGreaterThanEqual,
-        175 => bitcode::BinaryOp::SGreaterThanEqual,
-        176 => bitcode::BinaryOp::ULessThan,
-        177 => bitcode::BinaryOp::SLessThan,
-        178 => bitcode::BinaryOp::ULessThanEqual,
-        179 => bitcode::BinaryOp::SLessThanEqual,
-        180 => bitcode::BinaryOp::FOrdEqual,
-        181 => bitcode::BinaryOp::FUnordEqual,
-        182 => bitcode::BinaryOp::FOrdNotEqual,
-        183 => bitcode::BinaryOp::FUnordNotEqual,
-        184 => bitcode::BinaryOp::FOrdLessThan,
-        185 => bitcode::BinaryOp::FUnordLessThan,
-        186 => bitcode::BinaryOp::FOrdGreaterThan,
-        187 => bitcode::BinaryOp::FUnordGreaterThan,
-        188 => bitcode::BinaryOp::FOrdLessThanEqual,
-        189 => bitcode::BinaryOp::FUnordLessThanEqual,
-        190 => bitcode::BinaryOp::FOrdGreaterThanEqual,
-        191 => bitcode::BinaryOp::FUnordGreaterThanEqual,
-        194 => bitcode::BinaryOp::ShiftRightLogical,
-        195 => bitcode::BinaryOp::ShiftRightArithmetic,
-        196 => bitcode::BinaryOp::ShiftLeftLogical,
-        197 => bitcode::BinaryOp::BitwiseOr,
-        198 => bitcode::BinaryOp::BitwiseXor,
-        199 => bitcode::BinaryOp::BitwiseAnd,
-        _ => return None,
-    })
-}
-
-fn convert_op(opcode: u16) -> Option<bitcode::ConvertOp> {
-    Some(match opcode {
-        109 => bitcode::ConvertOp::FToU,
-        110 => bitcode::ConvertOp::FToS,
-        111 => bitcode::ConvertOp::SToF,
-        112 => bitcode::ConvertOp::UToF,
-        113 => bitcode::ConvertOp::UConvert,
-        114 => bitcode::ConvertOp::SConvert,
-        115 => bitcode::ConvertOp::FConvert,
-        117 | 120 | 121 | 122 | 124 => bitcode::ConvertOp::Bitcast,
-        _ => return None,
-    })
-}
-
-fn atomic_op(opcode: u16) -> Option<bitcode::AtomicOp> {
-    Some(match opcode {
-        227 => bitcode::AtomicOp::Load,
-        228 => bitcode::AtomicOp::Store,
-        229 => bitcode::AtomicOp::Exchange,
-        230 => bitcode::AtomicOp::CompareExchange,
-        232 => bitcode::AtomicOp::Increment,
-        233 => bitcode::AtomicOp::Decrement,
-        234 => bitcode::AtomicOp::Add,
-        235 => bitcode::AtomicOp::Sub,
-        236 => bitcode::AtomicOp::SignedMin,
-        237 => bitcode::AtomicOp::UnsignedMin,
-        238 => bitcode::AtomicOp::SignedMax,
-        239 => bitcode::AtomicOp::UnsignedMax,
-        240 => bitcode::AtomicOp::And,
-        241 => bitcode::AtomicOp::Or,
-        242 => bitcode::AtomicOp::Xor,
-        _ => return None,
-    })
-}
-
-fn parse_atomic<I: Iterator<Item = u32>>(
-    operation: bitcode::AtomicOp,
-    reader: &mut Reader<'_, I>,
-) -> Result<bitcode::Instruction, bitcode::Error> {
-    let result = match operation {
-        bitcode::AtomicOp::Store => None,
-        _ => {
-            let _result_type = reader.word()?;
-            Some(reader.word()?)
-        }
-    };
-
-    let pointer = reader.word()?;
-    let _memory_scope = reader.word()?;
-    let _memory_semantics = reader.word()?;
-
-    let (value, comparator) = match operation {
-        bitcode::AtomicOp::Load | bitcode::AtomicOp::Increment | bitcode::AtomicOp::Decrement => {
-            (None, None)
-        }
-        bitcode::AtomicOp::CompareExchange => {
-            let _unequal_semantics = reader.word()?;
-            let value = reader.word()?;
-            let comparator = reader.word()?;
-
-            (Some(value), Some(comparator))
-        }
-        _ => (Some(reader.word()?), None),
-    };
-
-    Ok(bitcode::Instruction::Atomic { result, operation, pointer, value, comparator })
 }
 
 fn parse_body<I: Iterator<Item = u32>>(
@@ -765,54 +761,6 @@ fn parse_body<I: Iterator<Item = u32>>(
     })
 }
 
-fn debug_location(
-    module: &bitcode::ModuleBuilder,
-    files: &[Option<bitcode::Id>],
-    operands: &[bitcode::Id],
-) -> Result<Option<bitcode::Location>, bitcode::Error> {
-    let [source, line, _, column, _] = operands else {
-        return Ok(None);
-    };
-
-    let Some(Some(file)) = files.get(*source as usize) else {
-        return Ok(None);
-    };
-
-    let line = literal(module, *line)?;
-    if line == 0 {
-        return Ok(None);
-    }
-
-    Ok(Some(bitcode::Location {
-        file: *file,
-        line,
-        column: literal(module, *column)?,
-    }))
-}
-
-fn memory_alignment<I: Iterator<Item = u32>>(reader: &mut Reader<'_, I>) -> Option<u32> {
-    let operands = reader.try_word()?;
-
-    match operands & MEMORY_ALIGNED {
-        0 => None,
-        _ => reader.try_word(),
-    }
-}
-
-fn memory_semantics(
-    module: &bitcode::ModuleBuilder,
-    id: bitcode::Id,
-) -> Result<bitcode::MemorySemantics, bitcode::Error> {
-    bitcode::MemorySemantics::from_word(literal(module, id)?)
-}
-
-fn literal(module: &bitcode::ModuleBuilder, id: bitcode::Id) -> Result<u32, bitcode::Error> {
-    match &module.constant(id)?.kind {
-        bitcode::ConstantKind::Scalar { bits } => Ok(*bits as u32),
-        _ => Err(bitcode::Error::NotAConstant(id)),
-    }
-}
-
 fn terminates(instruction: &bitcode::Instruction) -> bool {
     matches!(
         instruction,
@@ -853,6 +801,184 @@ fn set_layouts(module: &mut bitcode::ModuleBuilder) -> Result<(), bitcode::Error
     Ok(())
 }
 
+fn debug_location(
+    module: &bitcode::ModuleBuilder,
+    files: &[Option<bitcode::Id>],
+    operands: &[bitcode::Id],
+) -> Result<Option<bitcode::Location>, bitcode::Error> {
+    let [source, line, _, column, _] = operands else {
+        return Ok(None);
+    };
+
+    let Some(Some(file)) = files.get(*source as usize) else {
+        return Ok(None);
+    };
+
+    let line = literal(module, *line)?;
+    if line == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(bitcode::Location {
+        file: *file,
+        line,
+        column: literal(module, *column)?,
+    }))
+}
+
+fn literal(module: &bitcode::ModuleBuilder, id: bitcode::Id) -> Result<u32, bitcode::Error> {
+    match &module.constant(id)?.kind {
+        bitcode::ConstantKind::Scalar { bits } => Ok(*bits as u32),
+        _ => Err(bitcode::Error::NotAConstant(id)),
+    }
+}
+
+fn unary_op(opcode: u16) -> Option<bitcode::UnaryOp> {
+    Some(match opcode {
+        126 => bitcode::UnaryOp::SNegate,
+        127 => bitcode::UnaryOp::FNegate,
+        168 => bitcode::UnaryOp::LogicalNot,
+        200 => bitcode::UnaryOp::Not,
+        _ => return None,
+    })
+}
+
+fn binary_op(opcode: u16) -> Option<bitcode::BinaryOp> {
+    Some(match opcode {
+        128 => bitcode::BinaryOp::IAdd,
+        129 => bitcode::BinaryOp::FAdd,
+        130 => bitcode::BinaryOp::ISub,
+        131 => bitcode::BinaryOp::FSub,
+        132 => bitcode::BinaryOp::IMul,
+        133 => bitcode::BinaryOp::FMul,
+        134 => bitcode::BinaryOp::UDiv,
+        135 => bitcode::BinaryOp::SDiv,
+        136 => bitcode::BinaryOp::FDiv,
+        137 => bitcode::BinaryOp::UMod,
+        138 => bitcode::BinaryOp::SRem,
+        139 => bitcode::BinaryOp::SMod,
+        140 => bitcode::BinaryOp::FRem,
+        141 => bitcode::BinaryOp::FMod,
+        164 => bitcode::BinaryOp::LogicalEqual,
+        165 => bitcode::BinaryOp::LogicalNotEqual,
+        166 => bitcode::BinaryOp::LogicalOr,
+        167 => bitcode::BinaryOp::LogicalAnd,
+        170 => bitcode::BinaryOp::IEqual,
+        171 => bitcode::BinaryOp::INotEqual,
+        172 => bitcode::BinaryOp::UGreaterThan,
+        173 => bitcode::BinaryOp::SGreaterThan,
+        174 => bitcode::BinaryOp::UGreaterThanEqual,
+        175 => bitcode::BinaryOp::SGreaterThanEqual,
+        176 => bitcode::BinaryOp::ULessThan,
+        177 => bitcode::BinaryOp::SLessThan,
+        178 => bitcode::BinaryOp::ULessThanEqual,
+        179 => bitcode::BinaryOp::SLessThanEqual,
+        180 => bitcode::BinaryOp::FOrdEqual,
+        181 => bitcode::BinaryOp::FUnordEqual,
+        182 => bitcode::BinaryOp::FOrdNotEqual,
+        183 => bitcode::BinaryOp::FUnordNotEqual,
+        184 => bitcode::BinaryOp::FOrdLessThan,
+        185 => bitcode::BinaryOp::FUnordLessThan,
+        186 => bitcode::BinaryOp::FOrdGreaterThan,
+        187 => bitcode::BinaryOp::FUnordGreaterThan,
+        188 => bitcode::BinaryOp::FOrdLessThanEqual,
+        189 => bitcode::BinaryOp::FUnordLessThanEqual,
+        190 => bitcode::BinaryOp::FOrdGreaterThanEqual,
+        191 => bitcode::BinaryOp::FUnordGreaterThanEqual,
+        194 => bitcode::BinaryOp::ShiftRightLogical,
+        195 => bitcode::BinaryOp::ShiftRightArithmetic,
+        196 => bitcode::BinaryOp::ShiftLeftLogical,
+        197 => bitcode::BinaryOp::BitwiseOr,
+        198 => bitcode::BinaryOp::BitwiseXor,
+        199 => bitcode::BinaryOp::BitwiseAnd,
+        _ => return None,
+    })
+}
+
+fn atomic_op(opcode: u16) -> Option<bitcode::AtomicOp> {
+    Some(match opcode {
+        227 => bitcode::AtomicOp::Load,
+        228 => bitcode::AtomicOp::Store,
+        229 => bitcode::AtomicOp::Exchange,
+        230 => bitcode::AtomicOp::CompareExchange,
+        232 => bitcode::AtomicOp::Increment,
+        233 => bitcode::AtomicOp::Decrement,
+        234 => bitcode::AtomicOp::Add,
+        235 => bitcode::AtomicOp::Sub,
+        236 => bitcode::AtomicOp::SignedMin,
+        237 => bitcode::AtomicOp::UnsignedMin,
+        238 => bitcode::AtomicOp::SignedMax,
+        239 => bitcode::AtomicOp::UnsignedMax,
+        240 => bitcode::AtomicOp::And,
+        241 => bitcode::AtomicOp::Or,
+        242 => bitcode::AtomicOp::Xor,
+        _ => return None,
+    })
+}
+
+fn parse_atomic<I: Iterator<Item = u32>>(
+    operation: bitcode::AtomicOp,
+    reader: &mut Reader<'_, I>,
+) -> Result<bitcode::Instruction, bitcode::Error> {
+    let result = match operation {
+        bitcode::AtomicOp::Store => None,
+        _ => {
+            let _result_type = reader.word()?;
+            Some(reader.word()?)
+        }
+    };
+
+    let pointer = reader.word()?;
+    let _memory_scope = reader.word()?;
+    let _memory_semantics = reader.word()?;
+
+    let (value, comparator) = match operation {
+        bitcode::AtomicOp::Load | bitcode::AtomicOp::Increment | bitcode::AtomicOp::Decrement => {
+            (None, None)
+        }
+        bitcode::AtomicOp::CompareExchange => {
+            let _unequal_semantics = reader.word()?;
+            let value = reader.word()?;
+            let comparator = reader.word()?;
+
+            (Some(value), Some(comparator))
+        }
+        _ => (Some(reader.word()?), None),
+    };
+
+    Ok(bitcode::Instruction::Atomic { result, operation, pointer, value, comparator })
+}
+
+fn convert_op(opcode: u16) -> Option<bitcode::ConvertOp> {
+    Some(match opcode {
+        109 => bitcode::ConvertOp::FToU,
+        110 => bitcode::ConvertOp::FToS,
+        111 => bitcode::ConvertOp::SToF,
+        112 => bitcode::ConvertOp::UToF,
+        113 => bitcode::ConvertOp::UConvert,
+        114 => bitcode::ConvertOp::SConvert,
+        115 => bitcode::ConvertOp::FConvert,
+        117 | 120 | 121 | 122 | 124 => bitcode::ConvertOp::Bitcast,
+        _ => return None,
+    })
+}
+
+fn memory_alignment<I: Iterator<Item = u32>>(reader: &mut Reader<'_, I>) -> Option<u32> {
+    let operands = reader.try_word()?;
+
+    match operands & MEMORY_ALIGNED {
+        0 => None,
+        _ => reader.try_word(),
+    }
+}
+
+fn memory_semantics(
+    module: &bitcode::ModuleBuilder,
+    id: bitcode::Id,
+) -> Result<bitcode::MemorySemantics, bitcode::Error> {
+    bitcode::MemorySemantics::from_word(literal(module, id)?)
+}
+
 fn calc_layout(
     module: &mut bitcode::ModuleBuilder,
     type_id: bitcode::Id,
@@ -885,7 +1011,7 @@ fn calc_layout_inner(
         bitcode::Type::Bool => {
             bitcode::Layout { size: 1, alignment: 1, member_offsets: Vec::new() }
         }
-        bitcode::Type::Int { width } | bitcode::Type::Float { width } => {
+        bitcode::Type::Int { width, .. } | bitcode::Type::Float { width } => {
             let size = (*width as usize).div_ceil(8);
 
             bitcode::Layout { size, alignment: size, member_offsets: Vec::new() }

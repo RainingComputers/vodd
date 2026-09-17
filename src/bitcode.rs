@@ -217,6 +217,7 @@ pub enum Type {
     Bool,
     Int {
         width: u32,
+        signed: bool,
     },
     Float {
         width: u32,
@@ -653,6 +654,44 @@ pub struct Parameter {
     pub result_type: Id,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Encoding {
+    Boolean,
+    Float,
+    Signed,
+    Unsigned,
+    Address,
+    Unknown,
+}
+
+impl Encoding {
+    pub fn from_word(word: u32) -> Encoding {
+        match word {
+            1 => Encoding::Address,
+            2 => Encoding::Boolean,
+            3 => Encoding::Float,
+            4 | 5 => Encoding::Signed,
+            6 | 7 => Encoding::Unsigned,
+            _ => Encoding::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Basic {
+    pub name: String,
+    pub encoding: Encoding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Local {
+    pub name: String,
+    pub line: u32,
+    pub slot: Id,
+    pub indirect: bool,
+    pub basic: Option<Basic>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Function {
     pub result: Id,
@@ -660,6 +699,9 @@ pub struct Function {
     pub parameters: Vec<Parameter>,
     pub blocks: Vec<Block>,
     pub block_of_label: Vec<Option<usize>>,
+    pub locals: Vec<Local>,
+    pub prologue: Vec<u32>,
+    pub name: String,
 }
 
 impl Function {
@@ -808,7 +850,7 @@ impl Module {
 
     pub fn scalar_width(&self, type_id: Id) -> Result<u32, Error> {
         match self.type_(type_id)? {
-            Type::Int { width } => Ok(*width),
+            Type::Int { width, .. } => Ok(*width),
             Type::Float { width } => Ok(*width),
             Type::Bool => Ok(8),
             _ => Err(Error::UnsupportedType(type_id)),
@@ -991,6 +1033,10 @@ impl ModuleBuilder {
         slot.saturated_conversion |= source.saturated_conversion;
 
         Ok(())
+    }
+
+    pub fn string(&self, id: Id) -> Result<&str, Error> {
+        self.module.string(id)
     }
 
     pub fn set_string(&mut self, id: Id, text: String) -> Result<(), Error> {

@@ -150,23 +150,51 @@ static void parse_argument(char *spec, struct argument *argument)
     }
 }
 
+static const char *USAGE =
+    "usage: host [--repeat N] [--expect-local-memory BYTES]"
+    " <source> <entry> <global> <local> [argument ...]\n";
+
 int main(int argc, char **argv)
 {
-    if (argc < 5)
+    int launches = 1;
+    long expected_local_memory = -1;
+    int first = 1;
+
+    while (first + 1 < argc && strncmp(argv[first], "--", 2) == 0)
     {
-        fprintf(stderr, "usage: host <source> <entry> <global> <local> [argument ...]\n");
+        if (strcmp(argv[first], "--repeat") == 0)
+        {
+            launches = atoi(argv[first + 1]);
+            if (launches < 1) launches = 1;
+        }
+        else if (strcmp(argv[first], "--expect-local-memory") == 0)
+        {
+            expected_local_memory = strtol(argv[first + 1], NULL, 10);
+        }
+        else
+        {
+            fputs(USAGE, stderr);
+            return 1;
+        }
+
+        first += 2;
+    }
+
+    if (argc - first < 4)
+    {
+        fputs(USAGE, stderr);
         return 1;
     }
 
-    const char *path = argv[1];
-    const char *entry = argv[2];
+    const char *path = argv[first];
+    const char *entry = argv[first + 1];
     size_t global[3];
     size_t local[3];
 
-    read_sizes(argv[3], global);
-    read_sizes(argv[4], local);
+    read_sizes(argv[first + 2], global);
+    read_sizes(argv[first + 3], local);
 
-    int count = argc - 5;
+    int count = argc - first - 4;
     if (count > MAX_ARGUMENTS)
     {
         fprintf(stderr, "host: too many arguments\n");
@@ -177,7 +205,7 @@ int main(int argc, char **argv)
     for (int index = 0; index < count; index++)
     {
         char spec[MAX_SPEC];
-        strncpy(spec, argv[5 + index], sizeof(spec) - 1);
+        strncpy(spec, argv[first + 4 + index], sizeof(spec) - 1);
         spec[sizeof(spec) - 1] = '\0';
 
         parse_argument(spec, &arguments[index]);
@@ -217,8 +245,7 @@ int main(int argc, char **argv)
     cl_kernel kernel = clCreateKernel(program, entry, &status);
     if (status != CL_SUCCESS) fail("clCreateKernel", status);
 
-    const char *wanted = getenv("VODD_EXPECT_LOCAL_MEMORY");
-    if (wanted)
+    if (expected_local_memory >= 0)
     {
         cl_ulong reported = 0;
 
@@ -226,10 +253,10 @@ int main(int argc, char **argv)
                                           sizeof(reported), &reported, NULL);
         if (status != CL_SUCCESS) fail("clGetKernelWorkGroupInfo", status);
 
-        if (reported != (cl_ulong)strtoull(wanted, NULL, 10))
+        if (reported != (cl_ulong)expected_local_memory)
         {
-            fprintf(stderr, "host: CL_KERNEL_LOCAL_MEM_SIZE is %llu, expected %s\n",
-                    (unsigned long long)reported, wanted);
+            fprintf(stderr, "host: CL_KERNEL_LOCAL_MEM_SIZE is %llu, expected %ld\n",
+                    (unsigned long long)reported, expected_local_memory);
             return 1;
         }
     }
@@ -283,9 +310,12 @@ int main(int argc, char **argv)
 
     int dimensions = (global[2] > 1) ? 3 : ((global[1] > 1) ? 2 : 1);
 
-    status = clEnqueueNDRangeKernel(queue, kernel, (cl_uint)dimensions, NULL, global, local, 0,
-                                    NULL, NULL);
-    if (status != CL_SUCCESS) fail("clEnqueueNDRangeKernel", status);
+    for (int launch = 0; launch < launches; launch++)
+    {
+        status = clEnqueueNDRangeKernel(queue, kernel, (cl_uint)dimensions, NULL, global, local, 0,
+                                        NULL, NULL);
+        if (status != CL_SUCCESS) fail("clEnqueueNDRangeKernel", status);
+    }
 
     status = clFinish(queue);
     if (status != CL_SUCCESS) fail("clFinish", status);

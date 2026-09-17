@@ -1,0 +1,6 @@
+<div class="dockbody" id="{{ id }}">
+    <div class="hold grow">{{ findings | safe }}</div>
+    {%- if details %}
+        <div class="hold aside">{{ details | safe }}</div>
+    {%- endif %}
+</div>

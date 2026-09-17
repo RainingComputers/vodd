@@ -101,7 +101,7 @@ impl fmt::Display for detectors::Kind {
             detectors::Kind::BarrierDivergence { reached, expected } => write!(
                 formatter,
                 "work-group divergence at a barrier (scope {:#x} semantics {}, \
-                 but other work-items reached scope {:#x} semantics {})",
+                 but other work items reached scope {:#x} semantics {})",
                 reached.execution_scope,
                 reached.semantics,
                 expected.execution_scope,
@@ -109,13 +109,13 @@ impl fmt::Display for detectors::Kind {
             ),
             detectors::Kind::BarrierParticipation { arrived, total } => write!(
                 formatter,
-                "only {arrived} out of {total} work-items reached the barrier"
+                "only {arrived} out of {total} work items reached the barrier"
             ),
             detectors::Kind::DataRace { first, second } => write!(
                 formatter,
-                "data race between work-item {} and work-item {}",
-                triple("global", first.global),
-                triple("global", second.global)
+                "data race between work item {} and work item {}",
+                triple(first.global),
+                triple(second.global)
             ),
         }
     }
@@ -144,10 +144,10 @@ impl fmt::Display for detectors::Diagnostic {
         if let Some(entity) = &self.entity {
             write!(
                 formatter,
-                "\n  entity: {} {} {}",
-                triple("global", entity.global),
-                triple("local", entity.local),
-                triple("group", entity.group)
+                "\n  work item {}, work group {}, local id {}",
+                triple(entity.global),
+                triple(entity.group),
+                triple(entity.local)
             )?;
         }
 
@@ -155,8 +155,8 @@ impl fmt::Display for detectors::Diagnostic {
     }
 }
 
-fn triple(name: &str, value: [u64; 3]) -> String {
-    format!("{name}({},{},{})", value[0], value[1], value[2])
+fn triple(value: [u64; 3]) -> String {
+    format!("({}, {}, {})", value[0], value[1], value[2])
 }
 
 pub fn log(message: &str) {

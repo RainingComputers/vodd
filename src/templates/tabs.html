@@ -1,0 +1,13 @@
+<nav class="tabs" role="tablist" {% if id %}id="{{ id }}"{% endif %}>
+    {%- for tab in tabs %}
+        <button
+            class="tab across"
+            role="tab"
+            aria-selected="{{ tab.current | flag }}"
+            data-pick="tab:{{ tab.at }}"
+            data-mark="tab:{{ tab.at }}"
+        >
+            <span class="dot {{ tab.state }}"></span> {{ tab.name }}
+        </button>
+    {%- endfor %}
+</nav>

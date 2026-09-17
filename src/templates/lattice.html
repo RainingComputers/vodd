@@ -1,0 +1,37 @@
+<figure
+    class="widget lattice {{ kind }} d{{ dims }}"
+    style="--x: {{ columns }}; --y: {{ rows }}; --planes: {{ planes | length }}"
+    data-block="{{ block }}"
+    data-stride="{{ stride }}"
+    {%- if id %}id="{{ id }}"{% endif %}
+>
+    <figcaption>
+        <span class="what"> {{ title }} </span>
+        <span class="note mono"> {{ note }} </span>
+    </figcaption>
+    <div class="planes">
+        {%- for plane in planes %}
+            <div class="plane">
+                {%- if stacked %}
+                    <span class="depth mono"> z = {{ plane.depth }} </span>
+                {%- endif %}
+                <div class="rows">
+                    {%- for row in plane.rows %}
+                        <div class="row">
+                            {%- for cell in row %}
+                                <button
+                                    class="cell {{ cell.life }} {% if cell.marked %}marked{% endif %} {% if cell.selected %}on{% endif %}"
+                                    style="{{ cell.fill }}"
+                                    title="{{ cell.tip }}"
+                                    data-pick="{{ cell.pick }}"
+                                >
+                                    {% if labelled %}<b class="mono">{{ cell.label }}</b>{% endif %}
+                                </button>
+                            {%- endfor %}
+                        </div>
+                    {%- endfor %}
+                </div>
+            </div>
+        {%- endfor %}
+    </div>
+</figure>

@@ -1,0 +1,7 @@
+<footer class="statusbar mono across" {% if id %}id="{{ id }}"{% endif %}>
+    <span class="state {{ state }}"> {{ state_label }} </span>
+    <span> global <b> {{ global }} </b> </span>
+    <span> local <b> {{ local }} </b> </span>
+    <span> group <b> {{ progress }} </b> </span>
+    <span class="pill mono {{ severity }}"> {{ problems }} </span>
+</footer>

@@ -1,0 +1,53 @@
+<main class="page" id="page">
+    {{ strip | safe }}
+    {%- for tab in panes %}
+        <section
+            class="pane"
+            role="tabpanel"
+            data-launch="{{ tab.at }}"
+            data-show="tab:{{ tab.at }}"
+            {% if not tab.current %}hidden{% endif %}
+        >
+            <div class="col rail">
+                <div class="hold">{{ tab.groups | safe }}</div>
+                {{ tab.items | safe }}
+                <div class="hold grow">{{ tab.paths | safe }}</div>
+            </div>
+            <div
+                class="grip wide tallest"
+                data-drive="--rail-left"
+                data-scope="page"
+                data-sign="1"
+                role="separator"
+                aria-orientation="vertical"
+            ></div>
+            <div class="workspace">
+                <div class="col">
+                    <div class="hold grow">{{ tab.source | safe }}</div>
+                </div>
+                <div
+                    class="grip wide"
+                    data-drive="--rail-right"
+                    data-scope="page"
+                    data-sign="-1"
+                    role="separator"
+                    aria-orientation="vertical"
+                ></div>
+                {{ tab.side | safe }}
+            </div>
+            <div
+                class="grip tall"
+                data-drive="--dock"
+                data-scope="pane"
+                data-sign="-1"
+                role="separator"
+                aria-orientation="horizontal"
+            ></div>
+            <div class="dock">
+                {{ tab.dockbar | safe }}
+                {{ tab.dock | safe }}
+            </div>
+            {{ tab.status | safe }}
+        </section>
+    {%- endfor %}
+</main>

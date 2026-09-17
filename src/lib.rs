@@ -8,13 +8,17 @@ pub mod address;
 pub mod bitcode;
 pub mod compiler;
 pub mod consts;
+pub mod debugger;
 pub mod detectors;
 pub mod ffi;
+pub mod hypermedia;
+pub mod inspect;
 pub mod interpreter;
 pub mod logger;
 pub mod parser;
 pub mod platform;
 pub mod sys;
+pub mod templates;
 pub mod value;
 
 #[unsafe(no_mangle)]

@@ -1,0 +1,19 @@
+<figure class="widget" {% if id %}id="{{ id }}"{% endif %}>
+    <figcaption>
+        <span class="what"> Call stack </span>
+        <span class="note mono"> {{ note }} </span>
+    </figcaption>
+    {%- if frames %}
+        <ol class="frames">
+            {%- for row in frames %}
+                <li class="across base" aria-current="{{ row.selected | flag }}">
+                    <span class="at mono"> {{ row.depth }} </span>
+                    <b class="grew clip {{ row.tone }}" title="{{ row.text }}"> {{ row.name }} </b>
+                    <span class="site mono"> {{ row.at }} </span>
+                </li>
+            {%- endfor %}
+        </ol>
+    {%- else %}
+        <p class="empty">Not executing.</p>
+    {%- endif %}
+</figure>

@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .claude/
 ref/
+node_modules/
+test-results/
+playwright-report/
+/node_modules

@@ -68,6 +68,7 @@ impl Checks {
         for name in requested.split(',').map(str::trim) {
             match name {
                 "" => {}
+                "none" => checks = Checks::NONE,
                 "all" => checks = Checks { uniform_writes: checks.uniform_writes, ..Checks::ALL },
                 "mem" => checks.memory = true,
                 "type" => checks.types = true,
