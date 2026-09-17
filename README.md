@@ -1,7 +1,9 @@
 # vodd
 
-An OpenCL 1.2 ICD driver with a SPIR-V interpreter, and a debugger you drive
-from a browser.
+An OpenCL 1.2 driver with a SPIR-V interpreter and a debugger you drive
+from the browser. This project takes heavy inspiration from
+[Oclgrind](https://github.com/jrprice/Oclgrind). The project aims to
+redesign the traditional debugger interface for debugging GPGPU programs.
 
 Kernels run on an interpreter instead of hardware, so vodd can watch every
 memory access and report data races, barrier divergence and out of bounds
