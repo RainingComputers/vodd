@@ -9,6 +9,11 @@ Kernels run on an interpreter instead of hardware, so vodd can watch every
 memory access and report data races, barrier divergence and out of bounds
 reads while your program runs unchanged.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/debugger-dark.png">
+  <img alt="The vodd debugger paused inside a tree reduction. Half the work items are on the line that adds two elements and the other half are waiting at the barrier, so the work item lattice and the execution paths show the split, and the values panel classifies each local as shared, affine or uniform across the lanes." src="docs/debugger-light.png">
+</picture>
+
 ## Getting started
 
 - [Prerequisites](#prerequisites)
@@ -22,12 +27,17 @@ reads while your program runs unchanged.
 vodd compiles OpenCL C to SPIR-V using clang, so a clang with a SPIR-V target
 is required.
 
-| Tool       | Minimum | Notes                                              |
-| ---------- | ------- | -------------------------------------------------- |
-| Rust       | 1.85    | edition 2024, install with rustup                  |
-| clang      | 18      | 20 or newer is preferred, it has a native backend  |
-| llvm-spirv | 20      | only needed when clang has no native SPIR-V target |
-| spirv-link | any     | only needed to link multiple programs              |
+| Tool       | Minimum | Notes                                                 |
+| ---------- | ------- | ----------------------------------------------------- |
+| Rust       | 1.85    | edition 2024, install with rustup                     |
+| clang      | 18      | 20 or newer can also build kernels without llvm-spirv |
+| llvm-spirv | 20      | carries the line information the debugger needs       |
+| spirv-link | any     | only needed to link multiple programs                 |
+
+When llvm-spirv is present, kernels go through it and keep their line numbers
+and variables. Without it, clang 20 or newer emits SPIR-V on its own, and the
+kernels run and the checks still work, but nothing can name a line: the
+debugger has no current line, breakpoints never fire and locals are empty.
 
 On Debian and Ubuntu
 
@@ -69,6 +79,16 @@ test suites do.
 
 ```
 cc my-program.c -Ltarget/release -lvodd -Wl,-rpath,$PWD/target/release
+```
+
+On macOS, link directly. There is no `LD_PRELOAD`, and `DYLD_INSERT_LIBRARIES`
+does not divert calls away from the system OpenCL framework, so a program built
+against it keeps talking to Apple. The Khronos headers are vendored, so after
+`make submodules` this builds a program that sees the vodd platform.
+
+```
+cc my-program.c -DCL_TARGET_OPENCL_VERSION=120 -Itests/vendor/OpenCL-Headers -Ltarget/release -lvodd
+DYLD_LIBRARY_PATH=target/release ./a.out
 ```
 
 ### Correctness checks

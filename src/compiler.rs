@@ -156,10 +156,7 @@ pub fn compile(
         false => None,
     };
 
-    let translator = match backends_spirv(clang) {
-        true => None,
-        false => translator(),
-    };
+    let translator = translator();
 
     let produced = scratch.path.join("source.spv");
     let emitted = match translator {
