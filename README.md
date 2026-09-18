@@ -9,10 +9,7 @@ Kernels run on an interpreter instead of hardware, so vodd can watch every
 memory access and report data races, barrier divergence and out of bounds
 reads while your program runs unchanged.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/debugger-dark.png">
-  <img alt="The vodd debugger paused inside a tree reduction. Half the work items are on the line that adds two elements and the other half are waiting at the barrier, so the work item lattice and the execution paths show the split, and the values panel classifies each local as shared, affine or uniform across the lanes." src="docs/debugger-light.png">
-</picture>
+<img alt="The vodd debugger paused inside a tree reduction. Half the work items are on the line that adds two elements and the other half are waiting at the barrier, so the work item lattice and the execution paths show the split, and the values panel classifies each local as shared, affine or uniform across the lanes." src="docs/debugger-dark.png">
 
 ## Getting started
 
@@ -29,7 +26,7 @@ is required.
 
 | Tool       | Minimum | Notes                                                 |
 | ---------- | ------- | ----------------------------------------------------- |
-| Rust       | 1.85    | edition 2024, install with rustup                     |
+| Rust       | 1.88    | edition 2024, install with rustup                     |
 | clang      | 18      | 20 or newer can also build kernels without llvm-spirv |
 | llvm-spirv | 20      | carries the line information the debugger needs       |
 | spirv-link | any     | only needed to link multiple programs                 |

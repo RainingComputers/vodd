@@ -77,15 +77,11 @@ impl<'w, I: Iterator<Item = u32>> Reader<'w, I> {
 }
 
 pub fn parse(bytes: &[u8]) -> Result<bitcode::Module, bitcode::Error> {
-    if !bytes.len().is_multiple_of(4) {
+    let (words, []) = bytes.as_chunks::<4>() else {
         return Err(bitcode::Error::UnalignedLength);
-    }
+    };
 
-    parse_inner(
-        bytes
-            .chunks_exact(4)
-            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])),
-    )
+    parse_inner(words.iter().map(|word| u32::from_le_bytes(*word)))
 }
 
 fn parse_inner(words: impl IntoIterator<Item = u32>) -> Result<bitcode::Module, bitcode::Error> {
@@ -705,10 +701,13 @@ fn parse_body<I: Iterator<Item = u32>>(
         245 => {
             let result_type = reader.word()?;
             let result = reader.word()?;
-            let pairs = reader
-                .rest()
-                .chunks_exact(2)
-                .map(|pair| (pair[0], pair[1]))
+            let rest = reader.rest();
+            let (pairs, []) = rest.as_chunks::<2>() else {
+                return Err(bitcode::Error::IncompleteInstruction);
+            };
+            let pairs = pairs
+                .iter()
+                .map(|[value, parent]| (*value, *parent))
                 .collect();
             bitcode::Instruction::Phi { result, result_type, pairs }
         }
@@ -732,10 +731,13 @@ fn parse_body<I: Iterator<Item = u32>>(
         251 => {
             let selector = reader.word()?;
             let default_target = reader.word()?;
-            let cases = reader
-                .rest()
-                .chunks_exact(2)
-                .map(|pair| (u64::from(pair[0]), pair[1]))
+            let rest = reader.rest();
+            let (cases, []) = rest.as_chunks::<2>() else {
+                return Err(bitcode::Error::IncompleteInstruction);
+            };
+            let cases = cases
+                .iter()
+                .map(|[literal, target]| (u64::from(*literal), *target))
                 .collect();
             bitcode::Instruction::Switch { selector, default_target, cases }
         }

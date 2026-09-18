@@ -441,13 +441,13 @@ fn compare(spirv_case: &SpirvCase, produced: &[u8]) -> Result<(), String> {
             }
         }
         "ulp" => {
-            for (index, (one, other)) in produced
-                .chunks_exact(4)
-                .zip(spirv_case.expected.chunks_exact(4))
+            for (index, (one, other)) in words(produced)?
+                .iter()
+                .zip(words(&spirv_case.expected)?)
                 .enumerate()
             {
-                let produced_bits = u32::from_le_bytes([one[0], one[1], one[2], one[3]]);
-                let expected_bits = u32::from_le_bytes([other[0], other[1], other[2], other[3]]);
+                let produced_bits = u32::from_le_bytes(*one);
+                let expected_bits = u32::from_le_bytes(*other);
 
                 if produced_bits == expected_bits {
                     continue;
@@ -463,14 +463,13 @@ fn compare(spirv_case: &SpirvCase, produced: &[u8]) -> Result<(), String> {
             Ok(())
         }
         "permutation" => {
-            let mut produced_values: Vec<u32> = produced
-                .chunks_exact(4)
-                .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            let mut produced_values: Vec<u32> = words(produced)?
+                .iter()
+                .map(|word| u32::from_le_bytes(*word))
                 .collect();
-            let mut expected_values: Vec<u32> = spirv_case
-                .expected
-                .chunks_exact(4)
-                .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            let mut expected_values: Vec<u32> = words(&spirv_case.expected)?
+                .iter()
+                .map(|word| u32::from_le_bytes(*word))
                 .collect();
             produced_values.sort_unstable();
             expected_values.sort_unstable();
@@ -482,6 +481,13 @@ fn compare(spirv_case: &SpirvCase, produced: &[u8]) -> Result<(), String> {
             }
         }
         other => Err(format!("unknown compare mode {other}")),
+    }
+}
+
+fn words(bytes: &[u8]) -> Result<&[[u8; 4]], String> {
+    match bytes.as_chunks::<4>() {
+        (words, []) => Ok(words),
+        (_, rest) => Err(format!("{} trailing bytes do not make a word", rest.len())),
     }
 }
 
