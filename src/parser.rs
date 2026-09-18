@@ -11,11 +11,11 @@ const DEBUG_SOURCE: u32 = 35;
 const DEBUG_FUNCTION_DEFINITION: u32 = 101;
 const DEBUG_LINE: u32 = 103;
 const DEBUG_NO_LINE: u32 = 104;
-const DEBUG_SETS: &[&str] = &[
-    "OpenCL.DebugInfo.100",
-    "NonSemantic.Shader.DebugInfo.100",
-    "NonSemantic.Shader.DebugInfo.200",
-    "SPIRV.debug",
+const DEBUG_SETS: &[(&str, Operands)] = &[
+    ("OpenCL.DebugInfo.100", Operands::Literal),
+    ("NonSemantic.Shader.DebugInfo.100", Operands::Constant),
+    ("NonSemantic.Shader.DebugInfo.200", Operands::Constant),
+    ("SPIRV.debug", Operands::Literal),
 ];
 
 struct Reader<'w, I: Iterator<Item = u32>> {
@@ -131,8 +131,10 @@ fn parse_inner(words: impl IntoIterator<Item = u32>) -> Result<bitcode::Module, 
 
                 if name == "OpenCL.std" {
                     module.set_opencl_std(result);
-                } else if DEBUG_SETS.contains(&name.as_str()) {
-                    debug.sets.push(result);
+                } else if let Some((_, operands)) =
+                    DEBUG_SETS.iter().find(|(known, _)| *known == name)
+                {
+                    debug.sets.push((result, *operands));
                 }
             }
             12 => {
@@ -142,10 +144,11 @@ fn parse_inner(words: impl IntoIterator<Item = u32>) -> Result<bitcode::Module, 
                 let instruction = reader.word()?;
                 let operands = reader.rest();
 
-                if debug.owns(set) {
+                if let Some(convention) = debug.operands(set) {
                     parse_debug(
                         &module,
                         &mut debug,
+                        convention,
                         pending_function.as_mut(),
                         &mut current_line,
                         result,
@@ -398,8 +401,14 @@ struct Described {
     prologue: Vec<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Operands {
+    Literal,
+    Constant,
+}
+
 struct Debug {
-    sets: Vec<bitcode::Id>,
+    sets: Vec<(bitcode::Id, Operands)>,
     files: Vec<Option<bitcode::Id>>,
     basics: Vec<Option<bitcode::Basic>>,
     locals: Vec<Option<bitcode::Local>>,
@@ -417,14 +426,18 @@ impl Debug {
         }
     }
 
-    fn owns(&self, set: bitcode::Id) -> bool {
-        self.sets.contains(&set)
+    fn operands(&self, set: bitcode::Id) -> Option<Operands> {
+        self.sets
+            .iter()
+            .find(|(held, _)| *held == set)
+            .map(|(_, operands)| *operands)
     }
 }
 
 fn parse_debug(
     module: &bitcode::ModuleBuilder,
     debug: &mut Debug,
+    convention: Operands,
     function: Option<&mut bitcode::Function>,
     line: &mut Option<bitcode::Location>,
     result: bitcode::Id,
@@ -446,8 +459,8 @@ fn parse_debug(
                 operands.get(8),
                 debug.described.get_mut(result as usize),
             ) {
-                let declared = literal(module, *declared)?;
-                let scope = literal(module, *scope)?.max(declared);
+                let declared = operand(module, convention, *declared)?;
+                let scope = operand(module, convention, *scope)?.max(declared);
 
                 *slot = Some(Described {
                     name: module.string(*name).unwrap_or_default().to_string(),
@@ -463,7 +476,7 @@ fn parse_debug(
                 function.prologue = held.prologue.clone();
             }
         }
-        DEBUG_LINE => *line = debug_location(module, &debug.files, operands)?,
+        DEBUG_LINE => *line = debug_location(module, convention, &debug.files, operands)?,
         DEBUG_NO_LINE => *line = None,
         DEBUG_TYPE_BASIC => {
             if let (Some(name), Some(encoding), Some(slot)) = (
@@ -473,7 +486,7 @@ fn parse_debug(
             ) {
                 *slot = Some(bitcode::Basic {
                     name: module.string(*name).unwrap_or_default().to_string(),
-                    encoding: bitcode::Encoding::from_word(literal(module, *encoding)?),
+                    encoding: bitcode::Encoding::from_word(operand(module, convention, *encoding)?),
                 });
             }
         }
@@ -481,7 +494,7 @@ fn parse_debug(
             let held = match (operands.first(), operands.get(1), operands.get(3)) {
                 (Some(name), Some(kind), Some(at)) => Some(bitcode::Local {
                     name: module.string(*name).unwrap_or_default().to_string(),
-                    line: literal(module, *at).unwrap_or(0),
+                    line: operand(module, convention, *at).unwrap_or(0),
                     slot: 0,
                     indirect: false,
                     basic: debug
@@ -805,6 +818,7 @@ fn set_layouts(module: &mut bitcode::ModuleBuilder) -> Result<(), bitcode::Error
 
 fn debug_location(
     module: &bitcode::ModuleBuilder,
+    convention: Operands,
     files: &[Option<bitcode::Id>],
     operands: &[bitcode::Id],
 ) -> Result<Option<bitcode::Location>, bitcode::Error> {
@@ -816,7 +830,7 @@ fn debug_location(
         return Ok(None);
     };
 
-    let line = literal(module, *line)?;
+    let line = operand(module, convention, *line)?;
     if line == 0 {
         return Ok(None);
     }
@@ -824,8 +838,19 @@ fn debug_location(
     Ok(Some(bitcode::Location {
         file: *file,
         line,
-        column: literal(module, *column)?,
+        column: operand(module, convention, *column)?,
     }))
+}
+
+fn operand(
+    module: &bitcode::ModuleBuilder,
+    convention: Operands,
+    value: bitcode::Id,
+) -> Result<u32, bitcode::Error> {
+    match convention {
+        Operands::Literal => Ok(value),
+        Operands::Constant => literal(module, value),
+    }
 }
 
 fn literal(module: &bitcode::ModuleBuilder, id: bitcode::Id) -> Result<u32, bitcode::Error> {

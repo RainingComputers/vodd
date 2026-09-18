@@ -24,29 +24,27 @@ reads while your program runs unchanged.
 vodd compiles OpenCL C to SPIR-V using clang, so a clang with a SPIR-V target
 is required.
 
-| Tool       | Minimum | Notes                                                 |
-| ---------- | ------- | ----------------------------------------------------- |
-| Rust       | 1.88    | edition 2024, install with rustup                     |
-| clang      | 18      | 20 or newer can also build kernels without llvm-spirv |
-| llvm-spirv | 20      | carries the line information the debugger needs       |
-| spirv-link | any     | only needed to link multiple programs                 |
+| Tool       | Minimum | Notes                                           |
+| ---------- | ------- | ----------------------------------------------- |
+| Rust       | 1.88    | edition 2024, install with rustup               |
+| clang      | 23      | compiles OpenCL C to LLVM IR                    |
+| llvm-spirv | 23      | carries the line information the debugger needs |
+| spirv-link | v2026.3 | only needed to link multiple programs           |
 
 When llvm-spirv is present, kernels go through it and keep their line numbers
-and variables. Without it, clang 20 or newer emits SPIR-V on its own, and the
-kernels run and the checks still work, but nothing can name a line: the
-debugger has no current line, breakpoints never fire and locals are empty.
+and variables. Without it, clang emits SPIR-V on its own, and the kernels run
+and the checks still work, but nothing can name a line: the debugger has no
+current line, breakpoints never fire and locals are empty.
 
-On Debian and Ubuntu
-
-```
-sudo apt install clang-20 llvm-spirv-20 spirv-tools
-```
-
-On macOS
+The toolchain comes from Homebrew on both macOS and Linux. Distribution
+packages are not enough on Linux, they lag too far behind.
 
 ```
 brew install llvm spirv-llvm-translator spirv-tools
 ```
+
+If you do not have Homebrew, install it first from https://brew.sh. On Linux
+it lives under `/home/linuxbrew/.linuxbrew`, which vodd looks in.
 
 If the tools are not on your path, point vodd at them with `VODD_CLANG`,
 `VODD_LLVM_SPIRV` and `VODD_SPIRV_LINK`. When no usable toolchain is found,

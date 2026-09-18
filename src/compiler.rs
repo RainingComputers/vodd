@@ -6,11 +6,13 @@ use std::sync::atomic::Ordering;
 
 const LINKERS: &[&str] = &[
     "/opt/homebrew/bin/spirv-link",
+    "/home/linuxbrew/.linuxbrew/bin/spirv-link",
     "/usr/local/bin/spirv-link",
     "spirv-link",
 ];
 const TRANSLATORS: &[&str] = &[
     "/opt/homebrew/opt/spirv-llvm-translator/bin/llvm-spirv",
+    "/home/linuxbrew/.linuxbrew/opt/spirv-llvm-translator/bin/llvm-spirv",
     "/usr/local/opt/spirv-llvm-translator/bin/llvm-spirv",
     "llvm-spirv",
     "llvm-spirv-21",
@@ -18,6 +20,7 @@ const TRANSLATORS: &[&str] = &[
 ];
 const COMPILERS: &[&str] = &[
     "/opt/homebrew/opt/llvm/bin/clang",
+    "/home/linuxbrew/.linuxbrew/opt/llvm/bin/clang",
     "/opt/homebrew/opt/llvm@21/bin/clang",
     "/usr/local/opt/llvm/bin/clang",
     "clang",
@@ -27,8 +30,9 @@ const COMPILERS: &[&str] = &[
     "clang-18",
 ];
 const SPIRV_VERSION: &str = "1.1";
-const MINIMUM_CLANG: u32 = 18;
-const MINIMUM_TRANSLATOR: u32 = 20;
+const MINIMUM_CLANG: u32 = 23;
+const MINIMUM_TRANSLATOR: u32 = 23;
+const MINIMUM_LINKER: (u32, u32) = (2026, 3);
 const UNUSED: &str = "-Wno-unused-command-line-argument";
 const SUPPLIED: &[&str] = &[
     "atomic_inc",
@@ -265,21 +269,19 @@ pub fn linkable() -> bool {
 }
 
 pub fn requirements() -> String {
-    let clang = CLANG
-        .get()
-        .and_then(|found| found.as_ref())
-        .and_then(major_version);
-
-    let translator = TRANSLATOR
-        .get()
-        .and_then(|found| found.as_ref())
-        .and_then(major_version);
+    let clang = clang().and_then(major_version);
+    let translator = translator().and_then(major_version);
+    let linker = linker().and_then(linker_version);
 
     format!(
-        "clang >= {MINIMUM_CLANG} (found {}) and llvm-spirv >= {MINIMUM_TRANSLATOR} (found {}); \
-         set VODD_CLANG and VODD_LLVM_SPIRV to point at them",
+        "clang >= {MINIMUM_CLANG} (found {}), llvm-spirv >= {MINIMUM_TRANSLATOR} (found {}) \
+         and spirv-link >= v{}.{} (found {}); set VODD_CLANG, VODD_LLVM_SPIRV and \
+         VODD_SPIRV_LINK to point at them",
         describe(clang),
-        describe(translator)
+        describe(translator),
+        MINIMUM_LINKER.0,
+        MINIMUM_LINKER.1,
+        describe_linker(linker)
     )
 }
 
@@ -292,10 +294,7 @@ fn linker() -> Option<&'static PathBuf> {
                 .into_iter()
                 .chain(LINKERS.iter().map(PathBuf::from))
                 .find(|candidate| {
-                    Command::new(candidate)
-                        .arg("--version")
-                        .output()
-                        .is_ok_and(|output| output.status.success())
+                    linker_version(candidate).is_some_and(|found| found >= MINIMUM_LINKER)
                 })
         })
         .as_ref()
@@ -381,4 +380,30 @@ fn major_version(tool: &PathBuf) -> Option<u32> {
 
 fn describe(major: Option<u32>) -> String {
     major.map_or_else(|| "none".to_string(), |found| found.to_string())
+}
+
+fn describe_linker(release: Option<(u32, u32)>) -> String {
+    release.map_or_else(
+        || "none".to_string(),
+        |(year, revision)| format!("v{year}.{revision}"),
+    )
+}
+
+fn linker_version(tool: &PathBuf) -> Option<(u32, u32)> {
+    let output = Command::new(tool).arg("--version").output().ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let tagged = text
+        .split_whitespace()
+        .find(|word| word.starts_with('v') && word[1..].split('.').all(|part| !part.is_empty()))?;
+
+    let mut parts = tagged[1..].split('.');
+    let year = parts.next()?.parse().ok()?;
+    let revision = parts.next().unwrap_or("0").parse().ok()?;
+
+    Some((year, revision))
 }
