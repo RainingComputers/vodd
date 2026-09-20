@@ -31,13 +31,7 @@ is required.
 | llvm-spirv | 23      | carries the line information the debugger needs |
 | spirv-link | v2026.3 | only needed to link multiple programs           |
 
-When llvm-spirv is present, kernels go through it and keep their line numbers
-and variables. Without it, clang emits SPIR-V on its own, and the kernels run
-and the checks still work, but nothing can name a line: the debugger has no
-current line, breakpoints never fire and locals are empty.
-
-The toolchain comes from Homebrew on both macOS and Linux. Distribution
-packages are not enough on Linux, they lag too far behind.
+The toolchain comes from Homebrew on both macOS and Linux.
 
 ```
 brew install llvm spirv-llvm-translator spirv-tools
