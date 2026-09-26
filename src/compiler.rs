@@ -133,6 +133,7 @@ pub fn compile(
     enable_opt: Option<bool>,
 ) -> Result<Output> {
     let clang = clang().ok_or(Error::Missing)?;
+    let translator = translator().ok_or(Error::Missing)?;
     let scratch = Scratch::new()?;
 
     headers.iter().try_for_each(|(name, text)| {
@@ -160,18 +161,13 @@ pub fn compile(
         false => None,
     };
 
-    let translator = translator();
-
     let produced = scratch.path.join("source.spv");
-    let emitted = match translator {
-        Some(_) => scratch.path.join("source.bc"),
-        None => produced.clone(),
-    };
+    let emitted = scratch.path.join("source.bc");
 
     let mut command = Command::new(clang);
 
     command
-        .args(arguments(options, translator.is_some(), enable_opt))
+        .args(arguments(options, enable_opt))
         .arg(format!("-I{}", scratch.path.display()));
 
     if let Some(prelude) = &prelude {
@@ -191,48 +187,38 @@ pub fn compile(
         return Ok(Output { binary: None, log });
     }
 
-    if let Some(translator) = translator {
-        let translated = Command::new(translator)
-            .arg(&emitted)
-            .arg("-o")
-            .arg(&produced)
-            .arg("--spirv-debug-info-version=nonsemantic-shader-200")
-            .arg(format!("--spirv-max-version={SPIRV_VERSION}"))
-            .output()
-            .map_err(|_| Error::Spawn)?;
+    let translated = Command::new(translator)
+        .arg(&emitted)
+        .arg("-o")
+        .arg(&produced)
+        .arg("--spirv-debug-info-version=nonsemantic-shader-200")
+        .arg(format!("--spirv-max-version={SPIRV_VERSION}"))
+        .output()
+        .map_err(|_| Error::Spawn)?;
 
-        log.push_str(&String::from_utf8_lossy(&translated.stderr));
+    log.push_str(&String::from_utf8_lossy(&translated.stderr));
 
-        if !translated.status.success() {
-            return Ok(Output { binary: None, log });
-        }
+    if !translated.status.success() {
+        return Ok(Output { binary: None, log });
     }
 
     Ok(Output { binary: std::fs::read(&produced).ok(), log })
 }
 
-fn arguments(options: &str, staged: bool, enable_opt: Option<bool>) -> Vec<String> {
+fn arguments(options: &str, enable_opt: Option<bool>) -> Vec<String> {
     let disabled = options
         .split_whitespace()
         .any(|option| option == "-cl-opt-disable");
 
-    let optimisation = match (enable_opt, staged) {
-        (Some(false), _) => Some("-O0"),
-        (_, true) if disabled => Some("-O0"),
-        (_, true) => Some("-O2"),
-        (_, false) => None,
-    };
-
-    let staging: &[&str] = if staged {
-        &["--target=spir64", "-g", "-gembed-source", "-emit-llvm"]
-    } else {
-        &["--target=spirv64v1.0"]
+    let optimisation = match (enable_opt, disabled) {
+        (Some(false), _) | (_, true) => "-O0",
+        _ => "-O2",
     };
 
     ["-x", "cl", "-cl-std=CL1.2"]
         .iter()
-        .chain(staging)
-        .chain(optimisation.iter())
+        .chain(["--target=spir64", "-g", "-gembed-source", "-emit-llvm"].iter())
+        .chain([optimisation].iter())
         .chain(["-Xclang", "-finclude-default-header", "-c", UNUSED].iter())
         .map(|argument| argument.to_string())
         .chain(options.split_whitespace().map(|option| option.to_string()))
@@ -261,7 +247,7 @@ impl Drop for Scratch {
 }
 
 pub fn available() -> bool {
-    clang().is_some()
+    clang().is_some() && translator().is_some()
 }
 
 pub fn linkable() -> bool {
@@ -323,38 +309,17 @@ fn clang() -> Option<&'static PathBuf> {
                 .map(PathBuf::from)
                 .into_iter()
                 .chain(COMPILERS.iter().map(PathBuf::from))
-                .filter(|candidate| {
+                .find(|candidate| {
                     major_version(candidate).is_some_and(|major| major >= MINIMUM_CLANG)
-                })
-                .collect::<Vec<PathBuf>>()
-                .into_iter()
-                .fold(None, |chosen, candidate| match chosen {
-                    Some(found) if backends_spirv(&found) => Some(found),
-                    Some(found) if backends_spirv(&candidate) => Some(candidate),
-                    Some(found) => Some(found),
-                    None if targets_spirv(&candidate) => Some(candidate),
-                    None => None,
+                        && emits_spirv(candidate)
                 })
         })
         .as_ref()
 }
 
-fn targets_spirv(clang: &PathBuf) -> bool {
-    backends_spirv(clang) || emits_spirv(clang)
-}
-
-fn backends_spirv(clang: &PathBuf) -> bool {
-    Command::new(clang)
-        .arg("-print-targets")
-        .output()
-        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains("spirv64"))
-}
-
 fn emits_spirv(clang: &PathBuf) -> bool {
-    let staged = translator().is_some();
-
     Command::new(clang)
-        .args(arguments("", staged, None))
+        .args(arguments("", None))
         .args(["-o", "/dev/null", "/dev/null"])
         .output()
         .is_ok_and(|output| output.status.success())
