@@ -1,9 +1,10 @@
-use crate::debugger;
 use crate::hypermedia;
+use crate::hypermedia::Html;
 use crate::inspect;
-use minijinja::AutoEscape;
-use minijinja::Environment;
-use serde::Serialize;
+use crate::state;
+use maud::Markup;
+use maud::PreEscaped;
+use maud::html;
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::DefaultHasher;
@@ -18,66 +19,14 @@ use syntect::parsing::ParseState;
 use syntect::parsing::ScopeStack;
 use syntect::parsing::SyntaxSet;
 
-pub const COLOURS: [&str; 8] = [
-    "#0b6e99", "#0f7b6c", "#d9730d", "#6940a5", "#ad1a72", "#cb912f", "#e03e3e", "#4dab9a",
-];
-
-pub const FRAGMENTS: [Fragment; 8] = [
-    Fragment::Groups,
-    Fragment::Items,
-    Fragment::Source,
-    Fragment::Paths,
-    Fragment::Side,
-    Fragment::Dock,
-    Fragment::Dockbar,
-    Fragment::Status,
-];
-
-pub const SHARED: [Fragment; 1] = [Fragment::Tabs];
 pub const STYLE: &str = concat!(
     include_str!("templates/fonts.css"),
     include_str!("templates/style.css")
 );
-const LATTICE: &str = include_str!("templates/lattice.html");
-const UNAVAILABLE: &str = include_str!("templates/unavailable.html");
-const SOURCE: &str = include_str!("templates/source.html");
-const PATHS: &str = include_str!("templates/paths.html");
-const VALUES: &str = include_str!("templates/values.html");
-const FINDINGS: &str = include_str!("templates/findings.html");
-const STACK: &str = include_str!("templates/stack.html");
-const STATUS: &str = include_str!("templates/status.html");
-const DETAILS: &str = include_str!("templates/details.html");
-const ITEMS: &str = include_str!("templates/items.html");
-const SIDE: &str = include_str!("templates/side.html");
-const DOCK: &str = include_str!("templates/dock.html");
-const EMPTY: &str = include_str!("templates/empty.html");
-const PAGE: &str = include_str!("templates/page.html");
-const TABS: &str = include_str!("templates/tabs.html");
-const DOCKBAR: &str = include_str!("templates/dockbar.html");
-const REFUSED: &str = include_str!("templates/refused.html");
-const SHELL: &str = include_str!("templates/shell.html");
 const RESUME: &str = include_str!("templates/icons/resume.svg");
 const STEP: &str = include_str!("templates/icons/step.svg");
 const UNPLUGGED: &str = include_str!("templates/icons/unplugged.svg");
-const PAGES: &[(&str, &str)] = &[
-    ("lattice", LATTICE),
-    ("unavailable", UNAVAILABLE),
-    ("source", SOURCE),
-    ("paths", PATHS),
-    ("values", VALUES),
-    ("findings", FINDINGS),
-    ("stack", STACK),
-    ("status", STATUS),
-    ("details", DETAILS),
-    ("items", ITEMS),
-    ("side", SIDE),
-    ("dock", DOCK),
-    ("empty", EMPTY),
-    ("page", PAGE),
-    ("tabs", TABS),
-    ("dockbar", DOCKBAR),
-    ("shell", SHELL),
-];
+const SCRIPT: &str = include_str!("templates/debugger.js");
 
 const MAX_SIDE: u64 = 32;
 const MAX_CELLS: u64 = MAX_SIDE * MAX_SIDE;
@@ -86,62 +35,6 @@ const MAX_LANES: u64 = 256;
 const MAX_HIGHLIGHTS: usize = 32;
 static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
 static HIGHLIGHTS: OnceLock<Mutex<HashMap<u64, Arc<Vec<String>>>>> = OnceLock::new();
-static ENVIRONMENT: OnceLock<Result<Environment<'static>>> = OnceLock::new();
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Fragment {
-    Page,
-    Tabs,
-    Groups,
-    Items,
-    Source,
-    Paths,
-    Side,
-    Dock,
-    Dockbar,
-    Status,
-}
-
-impl Fragment {
-    pub fn name(self) -> &'static str {
-        match self {
-            Fragment::Page => "page",
-            Fragment::Tabs => "tabs",
-            Fragment::Groups => "groups",
-            Fragment::Items => "items",
-            Fragment::Source => "source",
-            Fragment::Paths => "paths",
-            Fragment::Side => "side",
-            Fragment::Dock => "dock",
-            Fragment::Dockbar => "dockbar",
-            Fragment::Status => "status",
-        }
-    }
-
-    pub fn named(name: &str) -> Option<Fragment> {
-        let all = [
-            Fragment::Page,
-            Fragment::Tabs,
-            Fragment::Groups,
-            Fragment::Items,
-            Fragment::Source,
-            Fragment::Paths,
-            Fragment::Side,
-            Fragment::Dock,
-            Fragment::Dockbar,
-            Fragment::Status,
-        ];
-
-        all.into_iter().find(|one| one.name() == name)
-    }
-
-    pub fn id(self, at: usize) -> String {
-        match self {
-            Fragment::Page | Fragment::Tabs => self.name().to_string(),
-            _ => format!("{}-{at}", self.name()),
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(String);
@@ -152,27 +45,6 @@ impl fmt::Display for Error {
     }
 }
 
-impl From<minijinja::Error> for Error {
-    fn from(error: minijinja::Error) -> Error {
-        Error(format!("the template failed, {error}"))
-    }
-}
-
-#[derive(Serialize)]
-struct UnavailableView<'a> {
-    id: &'a str,
-    title: &'a str,
-    reason: String,
-}
-
-#[derive(Serialize)]
-struct EmptyView<'a> {
-    id: &'a str,
-    title: &'a str,
-    message: &'a str,
-}
-
-#[derive(Serialize)]
 struct LatticeCell {
     label: String,
     life: inspect::Life,
@@ -183,26 +55,9 @@ struct LatticeCell {
     pick: String,
 }
 
-#[derive(Serialize)]
 struct LatticePlane {
     depth: u64,
     rows: Vec<Vec<LatticeCell>>,
-}
-
-#[derive(Serialize)]
-struct LatticeView {
-    id: String,
-    kind: &'static str,
-    title: &'static str,
-    note: String,
-    columns: u64,
-    rows: u64,
-    dims: u8,
-    labelled: bool,
-    stacked: bool,
-    block: u64,
-    stride: u64,
-    planes: Vec<LatticePlane>,
 }
 
 struct LatticeShape {
@@ -211,236 +66,63 @@ struct LatticeShape {
     block: u64,
 }
 
-#[derive(Serialize)]
-struct SourceRow {
-    number: u32,
-    stop: bool,
-    body: String,
-    mark: &'static str,
-    gap: u32,
-}
-
-#[derive(Serialize)]
-struct ControlButton {
-    control: debugger::Control,
-    label: &'static str,
-    icon: &'static str,
-    enabled: bool,
-    send: String,
-}
-
-#[derive(Serialize)]
-struct ControlBarView {
-    state: debugger::State,
-    state_label: &'static str,
-    commands: Vec<ControlButton>,
-}
-
-#[derive(Serialize)]
-struct SourceView {
-    id: String,
-    file: String,
-    rows: Vec<SourceRow>,
-    controls: ControlBarView,
-}
-
-#[derive(Serialize)]
-struct PathRow {
-    name: String,
-    colour: String,
-    label: String,
-    tip: String,
-    items: String,
-    share: String,
-    current: bool,
-    pick: String,
-}
-
-#[derive(Serialize)]
-struct PathsView {
-    id: String,
-    note: String,
-    tracks: Vec<PathRow>,
-}
-
-#[derive(Serialize)]
-struct ValueRow {
-    name: String,
-    at: String,
-    shown: String,
-    tone: &'static str,
-    type_name: String,
-    kind: inspect::Kind,
-}
-
-#[derive(Serialize)]
-struct ValuesView {
-    id: String,
-    scope: String,
-    values: Vec<ValueRow>,
-}
-
-#[derive(Serialize)]
-struct FrameRow {
-    name: String,
-    tone: &'static str,
-    at: String,
-    text: String,
-    selected: bool,
-    depth: usize,
-}
-
-#[derive(Serialize)]
-struct CallStackView {
-    id: String,
-    note: String,
-    frames: Vec<FrameRow>,
-}
-
-#[derive(Serialize)]
-struct FindingRow {
-    severity: inspect::Severity,
-    headline: String,
-    detail: String,
-    at: String,
-    selected: bool,
-    pick: String,
-}
-
-#[derive(Serialize)]
-struct FindingsView {
-    id: String,
-    findings: Vec<FindingRow>,
-}
-
-#[derive(Serialize)]
-struct DetailRow {
-    label: String,
-    value: String,
-}
-
-#[derive(Serialize)]
-struct DetailsView<'a> {
-    id: &'a str,
-    rows: Vec<DetailRow>,
-}
-
-#[derive(Serialize)]
-struct ItemsView {
-    id: String,
-    body: String,
-}
-
-#[derive(Serialize)]
-struct SideView {
-    id: String,
-    values: String,
-    stack: String,
-}
-
-#[derive(Serialize)]
-struct DockView {
-    id: String,
-    findings: String,
-    details: String,
-}
-
-#[derive(Serialize)]
-struct StatusBarView {
-    id: String,
-    state: debugger::State,
-    state_label: &'static str,
-    global: String,
-    local: String,
-    progress: String,
-    problems: String,
-    severity: &'static str,
-}
-
-#[derive(Serialize)]
-struct PaneView {
-    at: usize,
-    current: bool,
-    status: String,
-    dockbar: String,
-
-    source: String,
-    groups: String,
-    paths: String,
-
-    items: String,
-    side: String,
-    dock: String,
-}
-
-#[derive(Serialize)]
-struct TabRow {
-    at: usize,
-    name: String,
-    state: debugger::State,
-    current: bool,
-}
-
-#[derive(Serialize)]
-struct TabsView {
-    id: String,
-    tabs: Vec<TabRow>,
-}
-
-#[derive(Serialize)]
-struct DockbarView {
-    id: String,
-    problems: String,
-    severity: &'static str,
-}
-
-#[derive(Serialize)]
-struct PageView {
-    strip: String,
-    panes: Vec<PaneView>,
-}
-
-#[derive(Serialize)]
-struct ShellView {
-    body: String,
-    scripts: &'static str,
-    unplugged: &'static str,
-}
-
 type Result<T> = core::result::Result<T, Error>;
 
-pub fn shell(view: &debugger::Page) -> String {
-    let held = ShellView {
-        body: fragment(view, Fragment::Page, 0),
-        scripts: hypermedia::SCRIPTS,
-        unplugged: UNPLUGGED,
-    };
-
-    paint("shell", &held).unwrap_or_else(|error| unavailable("", "Shell", &error))
+pub fn draw(view: &state::Page) -> Html {
+    match tree(view) {
+        Ok(drawn) => drawn,
+        Err(error) => shared("page", Err(error)),
+    }
 }
 
-pub fn fragment(view: &debugger::Page, want: Fragment, at: usize) -> String {
-    let id = want.id(at);
-    let pane = view.tabs.get(at).zip(view.focus.get(at));
+pub fn shell(view: &state::Page) -> String {
+    let body = hypermedia::render(&draw(view));
 
-    let drawn = match (want, pane) {
-        (Fragment::Page, _) => page(view),
-        (Fragment::Tabs, _) => tabs(view, &id),
-        (_, None) => Err(missing(&id)),
-        (Fragment::Groups, Some((pane, focus))) => groups(pane, focus, &id),
-        (Fragment::Items, Some((pane, focus))) => items(pane, focus, at),
-        (Fragment::Source, Some((pane, focus))) => source(pane, focus, &id),
-        (Fragment::Paths, Some((pane, focus))) => paths(pane, focus, &id),
-        (Fragment::Side, Some((pane, focus))) => side(pane, focus, at),
-        (Fragment::Dock, Some((pane, focus))) => dock(pane, focus, at),
-        (Fragment::Dockbar, Some((pane, _))) => dockbar(pane, &id),
-        (Fragment::Status, Some((pane, _))) => status_bar(pane, &id),
-    };
-
-    drawn.unwrap_or_else(|error| unavailable(&id, want.name(), &error))
+    html! {
+        (PreEscaped("<!doctype html>"))
+        html lang="en" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                title { "vodd" }
+                link rel="stylesheet" href="/style.css";
+            }
+            body {
+                p class="link mono" role="status" {
+                    svg width="13" height="13" viewBox="0 0 16 16" fill="none"
+                        stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+                        stroke-linejoin="round" aria-hidden="true" {
+                        (PreEscaped(UNPLUGGED))
+                    }
+                    " Debugger disconnected"
+                }
+                (PreEscaped(body))
+                (PreEscaped(hypermedia::SCRIPTS))
+                script { (PreEscaped(SCRIPT)) }
+            }
+        }
+    }
+    .into_string()
 }
 
-fn page(view: &debugger::Page) -> Result<String> {
+pub fn missing(what: &str) -> Error {
+    Error(format!("{what} is not something this page can show"))
+}
+
+pub fn unavailable(id: &str, title: &str, error: &Error) -> String {
+    html! {
+        figure class="widget unavailable" id=[(!id.is_empty()).then_some(id)] {
+            figcaption {
+                span class="what" { " " (title) " " }
+                span class="note mono" { " unavailable " }
+            }
+            p class="reason" { (error) }
+        }
+    }
+    .into_string()
+}
+
+fn tree(view: &state::Page) -> Result<Html> {
     if view.tabs.is_empty() {
         return refuse("the page has no tabs, there is nothing to show");
     }
@@ -461,43 +143,137 @@ fn page(view: &debugger::Page) -> Result<String> {
         ));
     }
 
-    let mut panes = Vec::new();
+    let strip = shared("tabs", tabs(view, "tabs"));
+    let panes = view
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(at, launch)| pane(launch, &view.focus[at], at, at == view.selected))
+        .collect::<Result<Vec<Html>>>()?;
 
-    for (at, launch) in view.tabs.iter().enumerate() {
-        panes.push(pane(launch, &view.focus[at], at, at == view.selected)?);
+    Ok(hypermedia::tag(
+        "main",
+        &[("class", "page"), ("id", "page")],
+        std::iter::once(strip).chain(panes).collect(),
+    ))
+}
+
+fn leaf(name: &str, at: usize, drawn: Result<Markup>) -> Html {
+    tagged(ident(name, at), name, drawn)
+}
+
+fn shared(name: &str, drawn: Result<Markup>) -> Html {
+    tagged(name.to_string(), name, drawn)
+}
+
+fn tagged(id: String, name: &str, drawn: Result<Markup>) -> Html {
+    let body = match drawn {
+        Ok(markup) => markup.into_string(),
+        Err(error) => unavailable(&id, name, &error),
+    };
+
+    Html::Leaf { id, body }
+}
+
+fn ident(name: &str, at: usize) -> String {
+    format!("{name}-{at}")
+}
+
+fn pane(launch: &state::Pane, focus: &state::Focus, at: usize, current: bool) -> Result<Html> {
+    check_focus(launch, focus)?;
+
+    let index = at.to_string();
+    let show = format!("tab:{at}");
+
+    let mut attrs = vec![
+        ("class", "pane"),
+        ("role", "tabpanel"),
+        ("data-launch", index.as_str()),
+        ("data-show", show.as_str()),
+    ];
+
+    if !current {
+        attrs.push(("hidden", ""));
     }
 
-    paint(
-        "page",
-        &PageView { strip: tabs(view, &Fragment::Tabs.id(0))?, panes },
+    let rail = hypermedia::tag(
+        "div",
+        &[("class", "col rail")],
+        vec![
+            hold(
+                "hold",
+                leaf("groups", at, groups(launch, focus, &ident("groups", at))),
+            ),
+            leaf("items", at, items(launch, focus, at)),
+            hold(
+                "hold grow",
+                leaf("paths", at, paths(launch, focus, &ident("paths", at))),
+            ),
+        ],
+    );
+
+    let workspace = hypermedia::tag(
+        "div",
+        &[("class", "workspace")],
+        vec![
+            hypermedia::tag(
+                "div",
+                &[("class", "col")],
+                vec![hold(
+                    "hold grow",
+                    leaf("source", at, source(launch, at, &ident("source", at))),
+                )],
+            ),
+            grip("wide", "--rail-right", "page", "-1", "vertical"),
+            leaf("side", at, side(launch, focus, at)),
+        ],
+    );
+
+    let dock = hypermedia::tag(
+        "div",
+        &[("class", "dock")],
+        vec![
+            leaf("dockbar", at, dockbar(launch, &ident("dockbar", at))),
+            leaf("dock", at, dock(launch, focus, at)),
+        ],
+    );
+
+    Ok(hypermedia::tag(
+        "section",
+        &attrs,
+        vec![
+            rail,
+            grip("wide tallest", "--rail-left", "page", "1", "vertical"),
+            workspace,
+            grip("tall", "--dock", "pane", "-1", "horizontal"),
+            dock,
+            leaf("status", at, status_bar(launch, &ident("status", at))),
+        ],
+    ))
+}
+
+fn hold(class: &str, kid: Html) -> Html {
+    hypermedia::tag("div", &[("class", class)], vec![kid])
+}
+
+fn grip(class: &str, drive: &str, scope: &str, sign: &str, orientation: &str) -> Html {
+    let class = format!("grip {class}");
+
+    hypermedia::tag(
+        "div",
+        &[
+            ("class", class.as_str()),
+            ("data-drive", drive),
+            ("data-scope", scope),
+            ("data-sign", sign),
+            ("role", "separator"),
+            ("aria-orientation", orientation),
+        ],
+        Vec::new(),
     )
 }
 
-fn pane(
-    launch: &debugger::Pane,
-    focus: &debugger::Focus,
-    at: usize,
-    current: bool,
-) -> Result<PaneView> {
-    check_focus(launch, focus)?;
-
-    Ok(PaneView {
-        at,
-        current,
-        status: status_bar(launch, &Fragment::Status.id(at))?,
-        dockbar: dockbar(launch, &Fragment::Dockbar.id(at))?,
-
-        source: source(launch, focus, &Fragment::Source.id(at))?,
-        groups: groups(launch, focus, &Fragment::Groups.id(at))?,
-        paths: paths(launch, focus, &Fragment::Paths.id(at))?,
-
-        items: items(launch, focus, at)?,
-        side: side(launch, focus, at)?,
-        dock: dock(launch, focus, at)?,
-    })
-}
-
-fn check_focus(launch: &debugger::Pane, focus: &debugger::Focus) -> Result<()> {
+fn check_focus(launch: &state::Pane, focus: &state::Focus) -> Result<()> {
     let total = launch.total();
 
     if focus.group >= total {
@@ -540,27 +316,23 @@ fn check_focus(launch: &debugger::Pane, focus: &debugger::Focus) -> Result<()> {
     Ok(())
 }
 
-fn tabs(view: &debugger::Page, id: &str) -> Result<String> {
-    paint(
-        "tabs",
-        &TabsView {
-            id: id.to_string(),
-            tabs: view
-                .tabs
-                .iter()
-                .enumerate()
-                .map(|(at, launch)| TabRow {
-                    at,
-                    name: launch.name.to_string(),
-                    state: launch.state,
-                    current: at == view.selected,
-                })
-                .collect(),
-        },
-    )
+fn tabs(view: &state::Page, id: &str) -> Result<Markup> {
+    Ok(html! {
+        nav class="tabs" role="tablist" id=(id) {
+            @for (at, launch) in view.tabs.iter().enumerate() {
+                button class="tab across" role="tab"
+                       aria-selected=(flag(at == view.selected))
+                       data-pick=(format!("tab:{at}"))
+                       data-mark=(format!("tab:{at}")) {
+                    span class=(format!("dot {}", status_name(launch.status))) {}
+                    " " (launch.name)
+                }
+            }
+        }
+    })
 }
 
-fn groups(launch: &debugger::Pane, focus: &debugger::Focus, id: &str) -> Result<String> {
+fn groups(launch: &state::Pane, focus: &state::Focus, id: &str) -> Result<Markup> {
     let total = launch.total();
 
     if launch.dispatched > total {
@@ -582,7 +354,7 @@ fn groups(launch: &debugger::Pane, focus: &debugger::Focus, id: &str) -> Result<
 
         if shares.is_empty() {
             let settled = group < launch.dispatched
-                && !launch.running.contains(&group)
+                && launch.running != Some(group)
                 && !launch.faulted.contains(&group);
 
             if settled {
@@ -595,11 +367,11 @@ fn groups(launch: &debugger::Pane, focus: &debugger::Focus, id: &str) -> Result<
         }
 
         for share in shares {
-            if share.path >= COLOURS.len() {
+            if share.path >= state::COLOURS.len() {
                 return refuse(format!(
                     "group {group} names path {} but there are only {} colours",
                     share.path,
-                    COLOURS.len()
+                    state::COLOURS.len()
                 ));
             }
 
@@ -612,13 +384,13 @@ fn groups(launch: &debugger::Pane, focus: &debugger::Focus, id: &str) -> Result<
         }
     }
 
-    for group in &launch.running {
-        if *group >= launch.dispatched {
-            return refuse(format!(
-                "group {group} is running but only {} have been dispatched",
-                launch.dispatched
-            ));
-        }
+    if let Some(group) = launch.running
+        && group >= launch.dispatched
+    {
+        return refuse(format!(
+            "group {group} is running but only {} have been dispatched",
+            launch.dispatched
+        ));
     }
 
     for group in &launch.faulted {
@@ -630,50 +402,39 @@ fn groups(launch: &debugger::Pane, focus: &debugger::Focus, id: &str) -> Result<
     }
 
     let shape = lattice_shape(launch.counts, true)?;
-    let done = launch.dispatched - launch.running.len() as u64;
+    let done = launch.dispatched - u64::from(launch.running.is_some());
     let planes = lattice_planes(launch.counts, &shape, |at| {
         group_cell(launch, focus, at, shape.block)
     });
 
-    paint(
-        "lattice",
-        &LatticeView {
-            id: id.to_string(),
-            kind: "groups",
-            title: "Work groups",
-            note: format!("{}, {done} done", extent_label(launch.counts)),
-            columns: shape.columns,
-            rows: shape.rows,
-            dims: dims(launch.counts),
-            labelled: false,
-            stacked: launch.counts[2] > 1,
-            block: shape.block,
-            stride: launch.counts[0],
-            planes,
-        },
-    )
+    Ok(lattice(
+        id,
+        "groups",
+        "Work groups",
+        &format!("{}, {done} done", extent_label(launch.counts)),
+        launch.counts,
+        &shape,
+        false,
+        launch.counts[0],
+        &planes,
+    ))
 }
 
-fn group_cell(
-    launch: &debugger::Pane,
-    focus: &debugger::Focus,
-    at: [u64; 3],
-    block: u64,
-) -> LatticeCell {
+fn group_cell(launch: &state::Pane, focus: &state::Focus, at: [u64; 3], block: u64) -> LatticeCell {
     let counts = launch.counts;
 
-    let members: Vec<u64> = (0..block)
-        .flat_map(|dy| (0..block).map(move |dx| (dx, dy)))
-        .filter_map(|(dx, dy)| {
-            let (x, y) = (at[0] + dx, at[1] + dy);
+    let members = || {
+        (0..block)
+            .flat_map(|dy| (0..block).map(move |dx| (dx, dy)))
+            .filter_map(move |(dx, dy)| {
+                let (x, y) = (at[0] + dx, at[1] + dy);
 
-            (x < counts[0] && y < counts[1]).then(|| (at[2] * counts[1] + y) * counts[0] + x)
-        })
-        .collect();
+                (x < counts[0] && y < counts[1]).then(|| (at[2] * counts[1] + y) * counts[0] + x)
+            })
+    };
 
-    let alive = members
-        .iter()
-        .map(|index| group_life(launch, *index))
+    let alive = members()
+        .map(|index| group_life(launch, index))
         .min_by_key(|life| match life {
             inspect::Life::Running => 0,
             inspect::Life::Parked => 1,
@@ -682,20 +443,19 @@ fn group_cell(
         })
         .unwrap_or(inspect::Life::Pending);
 
-    let mut mix: Vec<debugger::Tint> = Vec::new();
-    for index in members
-        .iter()
-        .filter(|index| group_life(launch, **index) != inspect::Life::Pending)
-    {
-        for share in &launch.mix[*index as usize] {
+    let mix = members()
+        .filter(|index| group_life(launch, *index) != inspect::Life::Pending)
+        .flat_map(|index| &launch.mix[index as usize])
+        .fold(Vec::<state::Tint>::new(), |mut mix, share| {
             match mix.iter_mut().find(|held| held.path == share.path) {
                 Some(held) => held.part += share.part,
                 None => mix.push(*share),
             }
-        }
-    }
 
-    let leader = members[0];
+            mix
+        });
+
+    let leader = members().next().unwrap_or(0);
 
     LatticeCell {
         label: leader.to_string(),
@@ -704,13 +464,13 @@ fn group_cell(
             false => cell_fill(&mix),
         },
         life: alive,
-        marked: members.iter().any(|index| launch.faulted.contains(index)),
-        selected: members.contains(&focus.group),
+        marked: members().any(|index| launch.faulted.contains(&index)),
+        selected: members().any(|index| index == focus.group),
         tip: match block {
             1 => format!("group {}, {}, {}, index {leader}", at[0], at[1], at[2]),
             _ => format!(
                 "{} groups from {}, {}, {}",
-                members.len(),
+                members().count(),
                 at[0],
                 at[1],
                 at[2]
@@ -720,8 +480,8 @@ fn group_cell(
     }
 }
 
-fn group_life(launch: &debugger::Pane, index: u64) -> inspect::Life {
-    if launch.running.contains(&index) {
+fn group_life(launch: &state::Pane, index: u64) -> inspect::Life {
+    if launch.running == Some(index) {
         return inspect::Life::Running;
     }
 
@@ -731,89 +491,9 @@ fn group_life(launch: &debugger::Pane, index: u64) -> inspect::Life {
     }
 }
 
-fn lattice_shape(extent: [u64; 3], aggregate: bool) -> Result<LatticeShape> {
-    for (axis, span) in extent.iter().enumerate() {
-        if *span == 0 {
-            return refuse(format!(
-                "axis {axis} is zero, every axis needs at least one"
-            ));
-        }
-    }
-
-    if extent[2] > MAX_PLANES {
-        return refuse(format!(
-            "{} planes is more than the {MAX_PLANES} this can draw",
-            extent[2]
-        ));
-    }
-
-    let block = match (aggregate, extent[1]) {
-        (false, _) => 1,
-        (true, 1) => extent[0].div_ceil(MAX_CELLS).max(1),
-        (true, _) => extent[0].max(extent[1]).div_ceil(MAX_SIDE).max(1),
-    };
-
-    Ok(LatticeShape {
-        columns: extent[0].div_ceil(block),
-        rows: extent[1].div_ceil(block),
-        block,
-    })
-}
-
-fn lattice_planes(
-    extent: [u64; 3],
-    shape: &LatticeShape,
-    mut make: impl FnMut([u64; 3]) -> LatticeCell,
-) -> Vec<LatticePlane> {
-    (0..extent[2])
-        .map(|depth| LatticePlane {
-            depth,
-            rows: (0..shape.rows)
-                .map(|row| {
-                    (0..shape.columns)
-                        .filter_map(|column| {
-                            let x = column * shape.block;
-
-                            (x < extent[0]).then(|| make([x, row * shape.block, depth]))
-                        })
-                        .collect()
-                })
-                .collect(),
-        })
-        .collect()
-}
-
-fn cell_fill(mix: &[debugger::Tint]) -> String {
-    if mix.len() == 1 {
-        return format!("background: {}", path_colour(mix[0].path));
-    }
-
-    let total: f32 = mix.iter().map(|share| share.part).sum();
-    let mut at = 0.0;
-
-    let stops: Vec<String> = mix
-        .iter()
-        .map(|share| {
-            let from = at / total * 100.0;
-            at += share.part;
-
-            format!(
-                "{} {from:.2}% {:.2}%",
-                path_colour(share.path),
-                at / total * 100.0
-            )
-        })
-        .collect();
-
-    format!("background: linear-cell_fill(180deg, {})", stops.join(", "))
-}
-
-fn path_colour(path: usize) -> &'static str {
-    COLOURS[path % COLOURS.len()]
-}
-
-fn items(launch: &debugger::Pane, focus: &debugger::Focus, at: usize) -> Result<String> {
-    let id = Fragment::Items.id(at);
+#[allow(clippy::too_many_arguments)]
+fn items(launch: &state::Pane, focus: &state::Focus, at: usize) -> Result<Markup> {
+    let id = ident("items", at);
 
     let held = launch
         .resident()
@@ -823,18 +503,22 @@ fn items(launch: &debugger::Pane, focus: &debugger::Focus, at: usize) -> Result<
 
     let body = match held {
         Some(body) => body,
-        None => empty("", "Work items", absent_group(launch, focus.group))?,
+        None => empty("", "Work items", absent_group(launch, focus.group)),
     };
 
-    paint("items", &ItemsView { id, body })
+    Ok(html! {
+        div class="swaps" id=(id) {
+            div class="hold" { (body) }
+        }
+    })
 }
 
 fn items_lattice(
-    launch: &debugger::Pane,
-    group: &debugger::GroupCells,
-    focus: &debugger::Focus,
+    launch: &state::Pane,
+    group: &state::GroupCells,
+    focus: &state::Focus,
     id: &str,
-) -> Result<String> {
+) -> Result<Markup> {
     let shape = lattice_shape(launch.local, false)?;
     let flat = launch.local[0] * launch.local[1];
     let total = launch.lanes();
@@ -896,33 +580,167 @@ fn items_lattice(
         .filter(|lane| lane.life == inspect::Life::Done)
         .count();
 
-    paint(
-        "lattice",
-        &LatticeView {
-            id: id.to_string(),
-            kind: "items",
-            title: "Work items",
-            note: format!("{}, {done} done", extent_label(launch.local)),
-            columns: shape.columns,
-            rows: shape.rows,
-            dims: dims(launch.local),
-            labelled: total <= 64,
-            stacked: launch.local[2] > 1,
-            block: shape.block,
-            stride: launch.local[0],
-            planes,
-        },
-    )
+    Ok(lattice(
+        id,
+        "items",
+        "Work items",
+        &format!("{}, {done} done", extent_label(launch.local)),
+        launch.local,
+        &shape,
+        total <= 64,
+        launch.local[0],
+        &planes,
+    ))
 }
 
-fn absent_group(launch: &debugger::Pane, group: u64) -> &'static str {
-    match group < launch.dispatched {
-        true => "This work group has run, its work items are no longer held.",
-        false => "This work group has not started.",
+fn lattice(
+    id: &str,
+    kind: &str,
+    title: &str,
+    note: &str,
+    extent: [u64; 3],
+    shape: &LatticeShape,
+    labelled: bool,
+    stride: u64,
+    planes: &[LatticePlane],
+) -> Markup {
+    let stacked = extent[2] > 1;
+
+    html! {
+        figure class=(format!("widget lattice {kind} d{}", dims(extent)))
+               style=(format!("--x: {}; --y: {}; --planes: {}", shape.columns, shape.rows, planes.len()))
+               data-block=(shape.block)
+               data-stride=(stride)
+               id=[(!id.is_empty()).then_some(id)] {
+            figcaption {
+                span class="what" { " " (title) " " }
+                span class="note mono" { " " (note) " " }
+            }
+            div class="planes" {
+                @for plane in planes {
+                    div class="plane" {
+                        @if stacked {
+                            span class="depth mono" { " z = " (plane.depth) " " }
+                        }
+                        div class="rows" {
+                            @for row in &plane.rows {
+                                div class="row" {
+                                    @for cell in row {
+                                        button class=(cell_class(cell))
+                                               style=(cell.fill)
+                                               title=(cell.tip)
+                                               data-pick=(cell.pick) {
+                                            @if labelled {
+                                                b class="mono" { (cell.label) }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
-fn source(launch: &debugger::Pane, focus: &debugger::Focus, id: &str) -> Result<String> {
+fn cell_class(cell: &LatticeCell) -> String {
+    let mut out = format!("cell {}", life_name(cell.life));
+
+    if cell.marked {
+        out.push_str(" marked");
+    }
+
+    if cell.selected {
+        out.push_str(" on");
+    }
+
+    out
+}
+
+fn lattice_shape(extent: [u64; 3], aggregate: bool) -> Result<LatticeShape> {
+    for (axis, span) in extent.iter().enumerate() {
+        if *span == 0 {
+            return refuse(format!(
+                "axis {axis} is zero, every axis needs at least one"
+            ));
+        }
+    }
+
+    if extent[2] > MAX_PLANES {
+        return refuse(format!(
+            "{} planes is more than the {MAX_PLANES} this can draw",
+            extent[2]
+        ));
+    }
+
+    let block = match (aggregate, extent[1]) {
+        (false, _) => 1,
+        (true, 1) => extent[0].div_ceil(MAX_CELLS).max(1),
+        (true, _) => extent[0].max(extent[1]).div_ceil(MAX_SIDE).max(1),
+    };
+
+    Ok(LatticeShape {
+        columns: extent[0].div_ceil(block),
+        rows: extent[1].div_ceil(block),
+        block,
+    })
+}
+
+fn lattice_planes(
+    extent: [u64; 3],
+    shape: &LatticeShape,
+    mut make: impl FnMut([u64; 3]) -> LatticeCell,
+) -> Vec<LatticePlane> {
+    (0..extent[2])
+        .map(|depth| LatticePlane {
+            depth,
+            rows: (0..shape.rows)
+                .map(|row| {
+                    (0..shape.columns)
+                        .filter_map(|column| {
+                            let x = column * shape.block;
+
+                            (x < extent[0]).then(|| make([x, row * shape.block, depth]))
+                        })
+                        .collect()
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn cell_fill(mix: &[state::Tint]) -> String {
+    if mix.len() == 1 {
+        return format!("background: {}", path_colour(mix[0].path));
+    }
+
+    let total: f32 = mix.iter().map(|share| share.part).sum();
+    let mut at = 0.0;
+
+    let stops: Vec<String> = mix
+        .iter()
+        .map(|share| {
+            let from = at / total * 100.0;
+            at += share.part;
+
+            format!(
+                "{} {from:.2}% {:.2}%",
+                path_colour(share.path),
+                at / total * 100.0
+            )
+        })
+        .collect();
+
+    format!("background: linear-gradient(180deg, {})", stops.join(", "))
+}
+
+fn path_colour(path: usize) -> &'static str {
+    state::COLOURS[path % state::COLOURS.len()]
+}
+
+fn source(launch: &state::Pane, at: usize, id: &str) -> Result<Markup> {
     if launch.lines.is_empty() {
         return refuse("the source has no lines, there is nothing to show");
     }
@@ -936,35 +754,50 @@ fn source(launch: &debugger::Pane, focus: &debugger::Focus, id: &str) -> Result<
         }
     }
 
-    let rows = launch
-        .lines
-        .iter()
-        .zip(highlighted_source(&launch.lines).iter().cloned())
-        .enumerate()
-        .map(|(at, (line, body))| SourceRow {
-            number: line.number,
-            stop: line.stop,
-            body,
-            mark: source_mark(line.mark),
-            gap: match at {
-                0 => 0,
-                _ => line.number - launch.lines[at - 1].number - 1,
-            },
-        })
-        .collect();
+    let controls = control_bar(launch, at)?;
+    let bodies = highlighted_source(&launch.lines);
 
-    paint(
-        "source",
-        &SourceView {
-            id: id.to_string(),
-            file: launch.file.to_string(),
-            rows,
-            controls: control_bar(launch)?,
-        },
-    )
+    Ok(html! {
+        figure class="widget source" id=[(!id.is_empty()).then_some(id)] {
+            figcaption {
+                span class="what" { " Source " }
+                span class="note mono" { " " (launch.file) " " }
+            }
+            (controls)
+            div class="code mono" {
+                @for (row, line) in launch.lines.iter().enumerate() {
+                    @let gap = match row {
+                        0 => 0,
+                        _ => line.number - launch.lines[row - 1].number - 1,
+                    };
+                    @if gap > 0 {
+                        div class="elided" { (gap) " lines not shown" }
+                    }
+                    div class=(line_class(line)) {
+                        button data-post="/breakpoint"
+                               data-send=(format!("launch={at}&line={}", line.number))
+                               title=(format!("Toggle a breakpoint on line {}", line.number)) {
+                            (line.number)
+                        }
+                        code { (PreEscaped(bodies[row].clone())) }
+                    }
+                }
+            }
+        }
+    })
 }
 
-fn control_bar(launch: &debugger::Pane) -> Result<ControlBarView> {
+fn line_class(line: &state::SourceLine) -> String {
+    let mut out = format!("ln {}", source_mark(line.mark));
+
+    if line.stop {
+        out.push_str(" stop");
+    }
+
+    out
+}
+
+fn control_bar(launch: &state::Pane, at: usize) -> Result<Markup> {
     if launch.commands.is_empty() {
         return refuse("a control bar with no commands, there would be nothing to press");
     }
@@ -978,46 +811,32 @@ fn control_bar(launch: &debugger::Pane) -> Result<ControlBarView> {
         }
     }
 
-    Ok(ControlBarView {
-        state: launch.state,
-        state_label: launch.state.label(),
-        commands: launch
-            .commands
-            .iter()
-            .map(|command| ControlButton {
-                control: command.control,
-                label: command.control.label(),
-                icon: control_icon(command.control),
-                enabled: command.enabled,
-                send: format!("do={}", control_name(command.control)),
-            })
-            .collect(),
+    Ok(html! {
+        div class="controls across wrap" {
+            div class="transport" {
+                @for command in &launch.commands {
+                    button class=(format!("key {}", control_name(command.control)))
+                           title=(command.control.label())
+                           aria-label=(command.control.label())
+                           data-post="/control"
+                           data-send=(format!("launch={at}&do={}", control_name(command.control)))
+                           disabled[!command.enabled] {
+                        svg viewBox="0 0 16 16" fill="none" stroke="currentColor"
+                            stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"
+                            aria-hidden="true" {
+                            (PreEscaped(control_icon(command.control)))
+                        }
+                    }
+                }
+            }
+            span class=(format!("stance mono {}", status_name(launch.status))) {
+                " " (launch.status.label()) " "
+            }
+        }
     })
 }
 
-fn source_mark(mark: Option<debugger::SourceMark>) -> &'static str {
-    match mark {
-        Some(debugger::SourceMark::Current) => "current",
-        Some(debugger::SourceMark::Fault) => "fault",
-        None => "",
-    }
-}
-
-fn control_name(control: debugger::Control) -> &'static str {
-    match control {
-        debugger::Control::Resume => "resume",
-        debugger::Control::Step => "step",
-    }
-}
-
-fn control_icon(control: debugger::Control) -> &'static str {
-    match control {
-        debugger::Control::Resume => RESUME,
-        debugger::Control::Step => STEP,
-    }
-}
-
-fn highlighted_source(lines: &[debugger::SourceLine]) -> Arc<Vec<String>> {
+fn highlighted_source(lines: &[state::SourceLine]) -> Arc<Vec<String>> {
     let mut hasher = DefaultHasher::new();
 
     for line in lines {
@@ -1043,7 +862,7 @@ fn highlighted_source(lines: &[debugger::SourceLine]) -> Arc<Vec<String>> {
     made
 }
 
-fn highlight_lines(lines: &[debugger::SourceLine]) -> Vec<String> {
+fn highlight_lines(lines: &[state::SourceLine]) -> Vec<String> {
     let syntaxes = SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines);
 
     let Some(syntax) = syntaxes.find_syntax_by_extension("c") else {
@@ -1096,9 +915,13 @@ fn open_spans(stack: &ScopeStack) -> String {
         .collect()
 }
 
-fn paths(launch: &debugger::Pane, focus: &debugger::Focus, id: &str) -> Result<String> {
+fn paths(launch: &state::Pane, focus: &state::Focus, id: &str) -> Result<Markup> {
     if launch.showing(focus).is_empty() {
-        return empty(id, "Execution paths", absent_group(launch, focus.group));
+        return Ok(empty(
+            id,
+            "Execution paths",
+            absent_group(launch, focus.group),
+        ));
     }
 
     for path in launch.showing(focus) {
@@ -1108,169 +931,275 @@ fn paths(launch: &debugger::Pane, focus: &debugger::Focus, id: &str) -> Result<S
     }
 
     let total: u64 = launch.showing(focus).iter().map(|path| path.items).sum();
-    let tracks = launch
-        .paths
-        .iter()
-        .enumerate()
-        .map(|(index, path)| {
-            let at = path.at.to_string();
+    let note = format!(
+        "{} over {}",
+        plural(launch.showing(focus).len() as u64, "path"),
+        thousands(total)
+    );
 
-            let (label, tip) = match &path.at.text {
-                Some(text) => (text.clone(), format!("{at}  {text}")),
-                None => (at.clone(), at),
-            };
-
-            PathRow {
-                name: path.name.to_string(),
-                colour: path.colour.to_string(),
-                label,
-                tip,
-                items: thousands(path.items),
-                share: format!("{:.4}%", path.items as f64 / total as f64 * 100.0),
-                current: index == focus.path,
-                pick: format!("path:{index}"),
+    Ok(html! {
+        figure class="widget" id=[(!id.is_empty()).then_some(id)] {
+            figcaption {
+                span class="what" { " Execution paths " }
+                span class="note mono" { " " (note) " " }
             }
-        })
-        .collect();
-
-    paint(
-        "paths",
-        &PathsView {
-            id: id.to_string(),
-            note: format!(
-                "{} over {}",
-                plural(launch.showing(focus).len() as u64, "path"),
-                thousands(total)
-            ),
-            tracks,
-        },
-    )
+            div class="body" {
+                div class="bar" {
+                    @for path in &launch.paths {
+                        span style=(format!(
+                            "background: {}; width: {:.4}%",
+                            path.colour,
+                            path.items as f64 / total as f64 * 100.0
+                        )) {}
+                    }
+                }
+                ul class="tracks" {
+                    @for (index, path) in launch.paths.iter().enumerate() {
+                        @let at = path.at.to_string();
+                        @let (label, tip) = match &path.at.text {
+                            Some(text) => (text.clone(), format!("{at}  {text}")),
+                            None => (at.clone(), at.clone()),
+                        };
+                        li class="across" aria-current=(flag(index == focus.path))
+                           data-pick=(format!("path:{index}")) {
+                            span class="chip" style=(format!("background: {}", path.colour)) {}
+                            b { " " (path.name) " " }
+                            span class="grew mono clip" title=(tip) { " " (label) " " }
+                            span class="tally mono" { " " (thousands(path.items)) " " }
+                        }
+                    }
+                }
+            }
+        }
+    })
 }
 
-fn side(launch: &debugger::Pane, focus: &debugger::Focus, at: usize) -> Result<String> {
-    let id = Fragment::Side.id(at);
+fn side(launch: &state::Pane, focus: &state::Focus, at: usize) -> Result<Markup> {
+    let id = ident("side", at);
 
-    let Some(path) = launch.showing(focus).get(focus.path) else {
-        let missing = absent_group(launch, focus.group);
+    let (shown, stack) = match launch.showing(focus).get(focus.path) {
+        Some(path) => (values(path, ""), call_stack(path, focus, "")),
+        None => {
+            let missing = absent_group(launch, focus.group);
 
-        return paint(
-            "side",
-            &SideView {
-                id,
-                values: empty("", "Values", missing)?,
-                stack: empty("", "Call stack", missing)?,
-            },
-        );
+            (
+                empty("", "Values", missing),
+                empty("", "Call stack", missing),
+            )
+        }
     };
 
-    paint(
-        "side",
-        &SideView {
-            id,
-            values: values(path, "")?,
-            stack: call_stack(path, focus, "")?,
-        },
-    )
+    Ok(html! {
+        div class="col side" id=(id) {
+            div class="hold grow" { (shown) }
+            div class="hold grow" { (stack) }
+        }
+    })
 }
 
-fn values(path: &debugger::PathRow, id: &str) -> Result<String> {
-    let values = path
-        .values
-        .iter()
-        .map(|value| {
-            let (shown, tone) = match &value.shown {
-                Some(shown) => (shown.clone(), ""),
-                None => ("not available here".to_string(), "gone"),
-            };
-
-            ValueRow {
-                name: value.name.clone(),
-                at: value.at.to_string(),
-                shown,
-                tone,
-                type_name: value.type_name.clone(),
-                kind: value.kind,
+fn values(path: &state::PathRow, id: &str) -> Markup {
+    html! {
+        figure class="widget" id=[(!id.is_empty()).then_some(id)] {
+            figcaption {
+                span class="what" { " Values " }
+                span class="note mono" { " " (path.name) " " }
             }
-        })
-        .collect();
-
-    paint(
-        "values",
-        &ValuesView { id: id.to_string(), scope: path.name.to_string(), values },
-    )
-}
-
-fn call_stack(path: &debugger::PathRow, focus: &debugger::Focus, id: &str) -> Result<String> {
-    let frames = path
-        .frames
-        .iter()
-        .enumerate()
-        .map(|(depth, frame)| {
-            let (name, tone) = match frame.name.is_empty() {
-                true => ("unnamed".to_string(), "gone"),
-                false => (frame.name.clone(), ""),
-            };
-
-            FrameRow {
-                name,
-                tone,
-                at: site_label(frame.at.as_ref(), ""),
-                text: site_text(frame.at.as_ref()),
-                selected: depth == focus.frame,
-                depth,
+            @if path.values.is_empty() {
+                p class="empty" { "Nothing in scope here." }
+            } @else {
+                ul class="vars" {
+                    @for value in &path.values {
+                        @let (shown, tone) = match &value.shown {
+                            Some(shown) => (shown.clone(), ""),
+                            None => ("not available here".to_string(), "gone"),
+                        };
+                        li class="across base" {
+                            span class="name mono clip"
+                                 title=(format!("declared at {}", value.at)) {
+                                " " (value.name) " "
+                            }
+                            span class=(format!("grew mono clip {tone}")) title=(shown) {
+                                " " (shown) " "
+                            }
+                            span class="type mono clip" { " " (value.type_name) " " }
+                            span class=(format!("pill mono {}", kind_name(value.kind))) {
+                                " " (kind_name(value.kind)) " "
+                            }
+                        }
+                    }
+                }
             }
-        })
-        .collect();
-
-    paint(
-        "stack",
-        &CallStackView {
-            id: id.to_string(),
-            note: plural(path.frames.len() as u64, "frame"),
-            frames,
-        },
-    )
+        }
+    }
 }
 
-fn dock(launch: &debugger::Pane, focus: &debugger::Focus, at: usize) -> Result<String> {
-    let id = Fragment::Dock.id(at);
-
-    let held = launch
-        .diagnostics
-        .get(focus.finding)
-        .map(|finding| details(finding, ""))
-        .transpose()?;
-
-    paint(
-        "dock",
-        &DockView {
-            id,
-            findings: findings(launch, focus, &format!("findings-{at}"))?,
-            details: held.unwrap_or_default(),
-        },
-    )
+fn call_stack(path: &state::PathRow, focus: &state::Focus, id: &str) -> Markup {
+    html! {
+        figure class="widget" id=[(!id.is_empty()).then_some(id)] {
+            figcaption {
+                span class="what" { " Call stack " }
+                span class="note mono" {
+                    " " (plural(path.frames.len() as u64, "frame")) " "
+                }
+            }
+            @if path.frames.is_empty() {
+                p class="empty" { "Not executing." }
+            } @else {
+                ol class="frames" {
+                    @for (depth, frame) in path.frames.iter().enumerate() {
+                        @let (name, tone) = match frame.name.is_empty() {
+                            true => ("unnamed".to_string(), "gone"),
+                            false => (frame.name.clone(), ""),
+                        };
+                        li class="across base" aria-current=(flag(depth == focus.frame)) {
+                            span class="at mono" { " " (depth) " " }
+                            b class=(format!("grew clip {tone}"))
+                              title=(site_text(frame.at.as_ref())) {
+                                " " (name) " "
+                            }
+                            span class="site mono" {
+                                " " (site_label(frame.at.as_ref(), "")) " "
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
-fn findings(launch: &debugger::Pane, focus: &debugger::Focus, id: &str) -> Result<String> {
-    paint(
-        "findings",
-        &FindingsView {
-            id: id.to_string(),
-            findings: launch
-                .diagnostics
-                .iter()
-                .enumerate()
-                .map(|(index, finding)| FindingRow {
-                    severity: finding.severity,
-                    headline: finding.headline.clone(),
-                    detail: finding.detail.clone(),
-                    at: site_label(finding.at.as_ref(), "no line information"),
-                    selected: index == focus.finding,
-                    pick: format!("finding:{index}"),
-                })
-                .collect(),
-        },
-    )
+fn dock(launch: &state::Pane, focus: &state::Focus, at: usize) -> Result<Markup> {
+    let id = ident("dock", at);
+    let held = launch.diagnostics.get(focus.finding);
+    let found = findings(launch, focus, &format!("findings-{at}"));
+
+    Ok(html! {
+        div class="dockbody" id=(id) {
+            div class="hold grow" { (found) }
+            @if let Some(finding) = held {
+                div class="hold aside" { (details(finding, "")) }
+            }
+        }
+    })
+}
+
+fn findings(launch: &state::Pane, focus: &state::Focus, id: &str) -> Markup {
+    html! {
+        figure class="widget" id=[(!id.is_empty()).then_some(id)] {
+            figcaption {
+                span class="what" { " Diagnostics " }
+            }
+            @if launch.diagnostics.is_empty() {
+                p class="empty" { "No problems found." }
+            } @else {
+                ul class="findings" {
+                    @for (index, finding) in launch.diagnostics.iter().enumerate() {
+                        @let selected = index == focus.finding;
+                        li class=(severity_name(finding.severity))
+                           aria-current=(flag(selected))
+                           data-pick=(format!("finding:{index}")) {
+                            div class="top across base" {
+                                b class="clip" title=(finding.headline) {
+                                    " " (finding.headline) " "
+                                }
+                                span class="site mono" {
+                                    " " (site_label(finding.at.as_ref(), "no line information")) " "
+                                }
+                            }
+                            @if selected {
+                                span class="detail" { " " (finding.detail) " " }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn details(finding: &inspect::Diagnostic, id: &str) -> Markup {
+    html! {
+        figure class="widget" id=[(!id.is_empty()).then_some(id)] {
+            figcaption {
+                span class="what" { " Details " }
+            }
+            @if finding.rows.is_empty() {
+                p class="empty" { "No details for this one." }
+            } @else {
+                dl class="kv" {
+                    @for row in &finding.rows {
+                        dt { (row.label) }
+                        dd class="mono" {
+                            @match row.value.is_empty() {
+                                true => "unknown",
+                                false => (row.value),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn dockbar(launch: &state::Pane, id: &str) -> Result<Markup> {
+    Ok(html! {
+        header class="dockbar across base" id=[(!id.is_empty()).then_some(id)] {
+            span class="what" { " Diagnostics " }
+            span class=(format!("pill mono {}", worst_severity(&launch.diagnostics))) {
+                " " (thousands(launch.diagnostics.len() as u64)) " "
+            }
+        }
+    })
+}
+
+fn status_bar(launch: &state::Pane, id: &str) -> Result<Markup> {
+    let counts = launch.counts;
+    let local = launch.local;
+
+    let global = extent_label([
+        counts[0] * local[0],
+        counts[1] * local[1],
+        counts[2] * local[2],
+    ]);
+
+    let progress = format!(
+        "{} of {}",
+        thousands(launch.dispatched),
+        thousands(launch.total())
+    );
+
+    Ok(html! {
+        footer class="statusbar mono across" id=[(!id.is_empty()).then_some(id)] {
+            span class=(format!("state {}", status_name(launch.status))) {
+                " " (launch.status.label()) " "
+            }
+            span { " global " b { " " (global) " " } " " }
+            span { " local " b { " " (extent_label(local)) " " } " " }
+            span { " group " b { " " (progress) " " } " " }
+            span class=(format!("pill mono {}", worst_severity(&launch.diagnostics))) {
+                " " (thousands(launch.diagnostics.len() as u64)) " "
+            }
+        }
+    })
+}
+
+fn empty(id: &str, title: &str, message: &str) -> Markup {
+    html! {
+        figure class="widget" id=[(!id.is_empty()).then_some(id)] {
+            figcaption {
+                span class="what" { " " (title) " " }
+            }
+            p class="empty" { (message) }
+        }
+    }
+}
+
+fn absent_group(launch: &state::Pane, group: u64) -> &'static str {
+    match group < launch.dispatched {
+        true => "This work group has run, its work items are no longer held.",
+        false => "This work group has not started.",
+    }
 }
 
 fn site_label(at: Option<&inspect::Site>, absent: &str) -> String {
@@ -1300,95 +1229,61 @@ fn worst_severity(findings: &[inspect::Diagnostic]) -> &'static str {
     }
 }
 
-fn details(finding: &inspect::Diagnostic, id: &str) -> Result<String> {
-    let rows = finding
-        .rows
-        .iter()
-        .map(|row| DetailRow {
-            label: row.label.clone(),
-            value: match row.value.is_empty() {
-                true => "unknown".to_string(),
-                false => row.value.clone(),
-            },
-        })
-        .collect();
-
-    paint("details", &DetailsView { id, rows })
+fn source_mark(mark: Option<state::SourceMark>) -> &'static str {
+    match mark {
+        Some(state::SourceMark::Current) => "current",
+        Some(state::SourceMark::Fault) => "fault",
+        None => "",
+    }
 }
 
-fn dockbar(launch: &debugger::Pane, id: &str) -> Result<String> {
-    paint(
-        "dockbar",
-        &DockbarView {
-            id: id.to_string(),
-            problems: thousands(launch.diagnostics.len() as u64),
-            severity: worst_severity(&launch.diagnostics),
-        },
-    )
+fn control_name(control: state::Control) -> &'static str {
+    match control {
+        state::Control::Resume => "resume",
+        state::Control::Step => "step",
+    }
 }
 
-fn status_bar(launch: &debugger::Pane, id: &str) -> Result<String> {
-    let counts = launch.counts;
-    let local = launch.local;
-
-    paint(
-        "status",
-        &StatusBarView {
-            id: id.to_string(),
-            state: launch.state,
-            state_label: launch.state.label(),
-            global: extent_label([
-                counts[0] * local[0],
-                counts[1] * local[1],
-                counts[2] * local[2],
-            ]),
-            local: extent_label(local),
-            progress: format!(
-                "{} of {}",
-                thousands(launch.dispatched),
-                thousands(launch.total())
-            ),
-            problems: thousands(launch.diagnostics.len() as u64),
-            severity: worst_severity(&launch.diagnostics),
-        },
-    )
+fn control_icon(control: state::Control) -> &'static str {
+    match control {
+        state::Control::Resume => RESUME,
+        state::Control::Step => STEP,
+    }
 }
 
-pub fn missing(what: &str) -> Error {
-    Error(format!("{what} is not something this page can show"))
+fn status_name(state: state::Status) -> &'static str {
+    match state {
+        state::Status::Ready => "ready",
+        state::Status::Running => "running",
+        state::Status::Paused => "paused",
+        state::Status::Faulted => "faulted",
+        state::Status::Finished => "finished",
+    }
 }
 
-pub fn unavailable(id: &str, title: &str, error: &Error) -> String {
-    let context = UnavailableView { id, title, reason: error.to_string() };
-
-    paint("unavailable", &context).unwrap_or_else(|_| {
-        REFUSED
-            .replace("{title}", title)
-            .replace("{reason}", &context.reason)
-    })
+fn life_name(life: inspect::Life) -> &'static str {
+    match life {
+        inspect::Life::Pending => "pending",
+        inspect::Life::Running => "running",
+        inspect::Life::Parked => "parked",
+        inspect::Life::Done => "done",
+    }
 }
 
-fn empty(id: &str, title: &str, message: &str) -> Result<String> {
-    paint("empty", &EmptyView { id, title, message })
+fn kind_name(kind: inspect::Kind) -> &'static str {
+    match kind {
+        inspect::Kind::Uniform => "uniform",
+        inspect::Kind::Affine => "affine",
+        inspect::Kind::Divergent => "divergent",
+        inspect::Kind::Shared => "shared",
+    }
 }
 
-fn paint<T: Serialize>(name: &str, context: &T) -> Result<String> {
-    let environment = ENVIRONMENT
-        .get_or_init(|| {
-            let mut environment = Environment::new();
-            environment.set_auto_escape_callback(|_| AutoEscape::Html);
-            environment.add_filter("flag", flag);
-
-            for (named, body) in PAGES {
-                environment.add_template(named, body)?;
-            }
-
-            Ok(environment)
-        })
-        .as_ref()
-        .map_err(Clone::clone)?;
-
-    Ok(environment.get_template(name)?.render(context)?)
+fn severity_name(severity: inspect::Severity) -> &'static str {
+    match severity {
+        inspect::Severity::Error => "error",
+        inspect::Severity::Warning => "warning",
+    }
 }
 
 fn flag(value: bool) -> &'static str {

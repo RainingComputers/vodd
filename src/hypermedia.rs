@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::io::Write;
-use std::sync::Arc;
 use std::sync::mpsc::Receiver;
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::Sender;
 use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::channel;
 use std::sync::mpsc::sync_channel;
 use std::time::Duration;
 use std::time::Instant;
@@ -14,6 +15,7 @@ const SCRIPT: &str = "text/javascript; charset=utf-8";
 const PLAIN: &str = "text/plain; charset=utf-8";
 
 const BACKLOG: usize = 64;
+const TICK: Duration = Duration::from_millis(50);
 const BEAT: Duration = Duration::from_millis(250);
 
 const CLIENT: &str = include_str!("hypermedia/hypermedia.js");
@@ -27,6 +29,60 @@ const STREAM: &str = "HTTP/1.1 200 OK\r\n\
                       Cache-Control: no-cache\r\n\
                       Connection: keep-alive\r\n\
                       X-Accel-Buffering: no\r\n\r\n";
+
+const VOID: [&str; 14] = [
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
+
+enum Wire<C> {
+    Change(C),
+    Shell(SyncSender<String>),
+    Piece(String, SyncSender<Option<String>>),
+    Listen(SyncSender<(u64, Receiver<String>)>),
+    Leave(u64),
+}
+
+struct Subscriber {
+    id: u64,
+    post: SyncSender<String>,
+}
+
+#[derive(Default)]
+struct Listeners {
+    next: u64,
+    subscribers: Vec<Subscriber>,
+}
+
+impl Listeners {
+    fn listen(&mut self) -> (u64, Receiver<String>) {
+        let (post, inbox) = sync_channel(BACKLOG);
+
+        self.next += 1;
+        self.subscribers.push(Subscriber { id: self.next, post });
+
+        (self.next, inbox)
+    }
+
+    fn leave(&mut self, id: u64) {
+        self.subscribers.retain(|subscriber| subscriber.id != id);
+    }
+
+    fn count(&self) -> usize {
+        self.subscribers.len()
+    }
+
+    fn post(&mut self, id: u64, piece: &str) {
+        self.subscribers.retain(|subscriber| {
+            subscriber.id != id || subscriber.post.try_send(piece.to_string()).is_ok()
+        });
+    }
+
+    fn send(&mut self, piece: &str) {
+        self.subscribers
+            .retain(|subscriber| subscriber.post.try_send(piece.to_string()).is_ok());
+    }
+}
 
 pub struct Reply {
     code: u16,
@@ -109,11 +165,6 @@ impl Request {
         Some(self.number(name)? as usize)
     }
 
-    // TODO: this function is a smell?
-    pub fn sent(&self, name: &str) -> bool {
-        self.form.contains_key(name)
-    }
-
     pub fn answer(self, reply: Reply) {
         let kind = tiny_http::Header::from_bytes(&b"Content-Type"[..], reply.kind.as_bytes())
             .expect("content type");
@@ -139,240 +190,222 @@ impl Request {
     }
 }
 
-type Draw = Box<dyn Fn() -> Reply + Send + Sync>;
-type Piece = Box<dyn Fn(&str, usize) -> Reply + Send + Sync>;
-type Listen = Box<dyn Fn() -> Option<(u64, Receiver<String>)> + Send + Sync>;
-type Leave = Box<dyn Fn(u64) + Send + Sync>;
-type Act = Box<dyn Fn(&Request) -> Option<Reply> + Send + Sync>;
-type Note = Box<dyn Fn(&str) -> Reply + Send + Sync>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Html {
+    Tag {
+        name: String,
+        attrs: Vec<(String, String)>,
+        kids: Vec<Html>,
+    },
+    Leaf {
+        id: String,
+        body: String,
+    },
+}
 
-pub struct Wiring {
+pub struct ServerConfig<S, C> {
     pub style: &'static str,
-    pub page: Draw,
-    pub fragment: Piece,
-    pub listen: Listen,
-    pub leave: Leave,
-    pub act: Act,
-    pub missing: Note,
-    pub gone: Draw,
+    pub reduce: fn(S, C) -> S,
+    pub after: fn(S) -> (S, bool),
+    pub draw: fn(&S) -> Html,
+    pub shell: fn(&S) -> String,
+    pub serve: fn(&Request) -> (Vec<C>, Reply),
+    pub missing: fn(&str) -> Reply,
+    pub gone: fn() -> Reply,
 }
 
-pub struct Socket {
-    listener: tiny_http::Server,
-}
-
-impl Socket {
-    pub fn bind(address: &str) -> Result<Socket, String> {
-        tiny_http::Server::http(address)
-            .map(|listener| Socket { listener })
-            .map_err(|error| error.to_string())
+impl<S, C> Clone for ServerConfig<S, C> {
+    fn clone(&self) -> ServerConfig<S, C> {
+        *self
     }
+}
 
-    pub fn detach(self, name: &str, wiring: Wiring) {
+impl<S, C> Copy for ServerConfig<S, C> {}
+
+pub struct Server<C> {
+    post: Sender<Wire<C>>,
+}
+
+impl<C> Clone for Server<C> {
+    fn clone(&self) -> Server<C> {
+        Server { post: self.post.clone() }
+    }
+}
+
+impl<C: Send + 'static> Server<C> {
+    pub fn new<S: Send + 'static>(
+        name: &str,
+        address: &str,
+        state: S,
+        config: ServerConfig<S, C>,
+    ) -> Result<Server<C>, String> {
+        let listener = tiny_http::Server::http(address).map_err(|error| error.to_string())?;
+        let (post, inbox) = channel();
+
         std::thread::Builder::new()
-            .name(name.to_string())
-            .spawn(move || self.serve(wiring))
-            .expect("hypermedia thread");
+            .name(format!("{name}-state"))
+            .spawn(move || run(inbox, state, config))
+            .map_err(|error| error.to_string())?;
+
+        let held = Server { post: post.clone() };
+
+        std::thread::Builder::new()
+            .name(format!("{name}-http"))
+            .spawn(move || listen(listener, post, config))
+            .map_err(|error| error.to_string())?;
+
+        Ok(held)
     }
 
-    pub fn serve(self, wiring: Wiring) {
-        let wiring = Arc::new(wiring);
-
-        for arrived in self.listener.incoming_requests() {
-            let wiring = Arc::clone(&wiring);
-
-            std::thread::spawn(move || answer(&wiring, Request::take(arrived)));
-        }
-    }
-}
-
-struct Subscriber {
-    id: u64,
-    post: SyncSender<String>,
-}
-
-#[derive(Default)]
-struct Listeners {
-    next: u64,
-    subscribers: Vec<Subscriber>,
-}
-
-impl Listeners {
-    fn listen(&mut self) -> (u64, Receiver<String>) {
-        let (post, inbox) = sync_channel(BACKLOG);
-
-        self.next += 1;
-        self.subscribers.push(Subscriber { id: self.next, post });
-
-        (self.next, inbox)
-    }
-
-    fn leave(&mut self, id: u64) {
-        self.subscribers.retain(|subscriber| subscriber.id != id);
-    }
-
-    fn count(&self) -> usize {
-        self.subscribers.len()
-    }
-
-    fn post(&mut self, id: u64, piece: &str) {
-        self.subscribers.retain(|subscriber| {
-            subscriber.id != id || subscriber.post.try_send(piece.to_string()).is_ok()
-        });
-    }
-
-    fn send(&mut self, piece: &str) {
-        self.subscribers
-            .retain(|subscriber| subscriber.post.try_send(piece.to_string()).is_ok());
+    pub fn post(&self, change: C) -> bool {
+        self.post.send(Wire::Change(change)).is_ok()
     }
 }
 
-pub struct Sheet<'a, K> {
-    pub page: K,
-    pub shared: &'a [K],
-    pub each: &'a [K],
-    pub panes: usize,
-    pub id: &'a dyn Fn(K, usize) -> String,
-    pub draw: &'a dyn Fn(K, usize) -> String,
-}
-
-// TODO: audit this struct
-pub struct Hypermedia<K> {
-    listeners: Listeners,
-    dirty: BTreeSet<(usize, K)>,
-    whole: bool,
-    prompt: bool,
-    flushed: Instant,
-}
-
-impl<K> Default for Hypermedia<K> {
-    fn default() -> Hypermedia<K> {
-        Hypermedia {
-            listeners: Listeners::default(),
-            dirty: BTreeSet::new(),
-            whole: false,
-            prompt: false,
-            flushed: Instant::now(),
-        }
+pub fn tag(name: &str, attrs: &[(&str, &str)], kids: Vec<Html>) -> Html {
+    Html::Tag {
+        name: name.to_string(),
+        attrs: attrs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect(),
+        kids,
     }
 }
 
-impl<K: Copy + Ord> Hypermedia<K> {
-    pub fn soil(&mut self, at: usize, fragment: K) {
-        self.dirty.insert((at, fragment));
-    }
+pub fn render(node: &Html) -> String {
+    let mut out = String::new();
 
-    pub fn refresh(&mut self) {
-        self.whole = true;
-    }
+    write(node, &mut out);
 
-    pub fn prompt(&mut self) {
-        self.prompt = true;
-    }
+    out
+}
 
-    pub fn leave(&mut self, id: u64) {
-        self.listeners.leave(id);
-    }
+fn run<S, C>(inbox: Receiver<Wire<C>>, mut state: S, config: ServerConfig<S, C>) {
+    let mut watchers = Listeners::default();
+    let mut shown = (config.draw)(&state);
+    let mut beat = Instant::now();
 
-    pub fn greet(&mut self, sheet: &Sheet<'_, K>) -> (u64, Receiver<String>) {
-        let (id, inbox) = self.listeners.listen();
+    loop {
+        match inbox.recv_timeout(TICK) {
+            Ok(Wire::Change(change)) => state = (config.reduce)(state, change),
+            Ok(Wire::Shell(reply)) => drop(reply.send((config.shell)(&state))),
+            Ok(Wire::Leave(id)) => watchers.leave(id),
+            Ok(Wire::Piece(id, reply)) => {
+                let body = find(&(config.draw)(&state), &id).map(render);
 
-        for piece in self.primer(sheet) {
-            self.listeners.post(id, &piece);
-        }
-
-        (id, inbox)
-    }
-
-    pub fn flush(&mut self, sheet: &Sheet<'_, K>, resting: bool) {
-        if !self.due(resting) {
-            return;
-        }
-
-        if self.listeners.count() == 0 {
-            self.dirty.clear();
-            self.whole = false;
-
-            return;
-        }
-
-        if self.whole {
-            self.whole = false;
-            self.dirty.clear();
-
-            for piece in self.primer(sheet) {
-                self.listeners.send(&piece);
+                drop(reply.send(body));
             }
+            Ok(Wire::Listen(reply)) => {
+                push(&state, config.draw, &mut watchers, &mut shown);
 
-            return;
-        }
+                let (id, inbox) = watchers.listen();
 
-        for (at, fragment) in std::mem::take(&mut self.dirty) {
-            let piece = event(&(sheet.id)(fragment, at), &(sheet.draw)(fragment, at));
+                let name = named(&shown).unwrap_or_default();
 
-            self.listeners.send(&piece);
-        }
-    }
-
-    fn due(&mut self, resting: bool) -> bool {
-        if !self.prompt && !resting && self.flushed.elapsed() < BEAT {
-            return false;
-        }
-
-        self.prompt = false;
-        self.flushed = Instant::now();
-
-        true
-    }
-
-    fn primer(&self, sheet: &Sheet<'_, K>) -> Vec<String> {
-        let mut out = vec![event("page", &(sheet.draw)(sheet.page, 0))];
-
-        for want in sheet.shared {
-            out.push(event(&(sheet.id)(*want, 0), &(sheet.draw)(*want, 0)));
-        }
-
-        for at in 0..sheet.panes {
-            for want in sheet.each {
-                out.push(event(&(sheet.id)(*want, at), &(sheet.draw)(*want, at)));
+                watchers.post(id, &event(name, &render(&shown)));
+                drop(reply.send((id, inbox)));
             }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
         }
 
-        out
+        let (next, urgent) = (config.after)(state);
+        state = next;
+
+        if watchers.count() == 0 || !(urgent || beat.elapsed() >= BEAT) {
+            continue;
+        }
+
+        beat = Instant::now();
+
+        push(&state, config.draw, &mut watchers, &mut shown);
     }
 }
 
-fn answer(wiring: &Wiring, request: Request) {
+fn push<S>(state: &S, draw: fn(&S) -> Html, watchers: &mut Listeners, shown: &mut Html) {
+    let next = draw(state);
+    let mut out = Vec::new();
+
+    diff(shown, &next, &mut out);
+
+    for (id, body) in out {
+        watchers.send(&event(&id, &body));
+    }
+
+    *shown = next;
+}
+
+fn listen<S: 'static, C: Send + 'static>(
+    listener: tiny_http::Server,
+    post: Sender<Wire<C>>,
+    config: ServerConfig<S, C>,
+) {
+    for arrived in listener.incoming_requests() {
+        let post = post.clone();
+
+        std::thread::spawn(move || answer(&post, config, Request::take(arrived)));
+    }
+}
+
+fn answer<S, C>(post: &Sender<Wire<C>>, config: ServerConfig<S, C>, request: Request) {
     if let Some(reply) = asset(request.path()) {
         return request.answer(reply);
     }
 
     let reply = match request.route().as_slice() {
-        [""] => (wiring.page)(),
-        ["style.css"] => Reply::css(wiring.style),
-        ["fragment", name] => (wiring.fragment)(name, 0),
-        ["fragment", name, at] => match at.parse() {
-            Ok(at) => (wiring.fragment)(name, at),
-            Err(_) => (wiring.missing)(request.path()),
+        [""] => match ask(post, Wire::Shell) {
+            Some(body) => Reply::html(body),
+            None => (config.gone)(),
         },
-        ["events"] => return stream(wiring, request),
-        _ => match (wiring.act)(&request) {
-            Some(reply) => reply,
-            None => (wiring.missing)(request.path()),
+        ["style.css"] => Reply::css(config.style),
+        ["fragment", name] => piece(post, config, name.to_string()),
+        ["fragment", name, at] => match at.parse::<usize>() {
+            Ok(at) => piece(post, config, format!("{name}-{at}")),
+            Err(_) => (config.missing)(request.path()),
         },
+        ["events"] => return stream(post, config, request),
+        _ => {
+            let (changes, reply) = (config.serve)(&request);
+
+            for change in changes {
+                let _posted = post.send(Wire::Change(change));
+            }
+
+            reply
+        }
     };
 
     request.answer(reply);
 }
 
-fn stream(wiring: &Wiring, request: Request) {
-    let Some((id, inbox)) = (wiring.listen)() else {
-        return request.answer((wiring.gone)());
+fn piece<S, C>(post: &Sender<Wire<C>>, config: ServerConfig<S, C>, id: String) -> Reply {
+    match ask(post, |reply| Wire::Piece(id.clone(), reply)) {
+        Some(Some(body)) => Reply::html(body),
+        Some(None) => (config.missing)(&id),
+        None => (config.gone)(),
+    }
+}
+
+fn stream<S, C>(post: &Sender<Wire<C>>, config: ServerConfig<S, C>, request: Request) {
+    let Some((id, inbox)) = ask(post, Wire::Listen) else {
+        return request.answer((config.gone)());
     };
 
     request.feed(inbox);
 
-    (wiring.leave)(id);
+    let _posted = post.send(Wire::Leave(id));
+}
+
+fn ask<C, T: Send + 'static>(
+    post: &Sender<Wire<C>>,
+    make: impl FnOnce(SyncSender<T>) -> Wire<C>,
+) -> Option<T> {
+    let (reply, answer) = sync_channel(1);
+
+    post.send(make(reply)).ok()?;
+
+    answer.recv().ok()
 }
 
 fn asset(path: &str) -> Option<Reply> {
@@ -423,4 +456,113 @@ fn unescape(text: &str) -> String {
     }
 
     out
+}
+
+fn find<'a>(node: &'a Html, id: &str) -> Option<&'a Html> {
+    if named(node) == Some(id) {
+        return Some(node);
+    }
+
+    match node {
+        Html::Tag { kids, .. } => kids.iter().find_map(|kid| find(kid, id)),
+        Html::Leaf { .. } => None,
+    }
+}
+
+fn diff(old: &Html, new: &Html, out: &mut Vec<(String, String)>) -> bool {
+    if old == new {
+        return false;
+    }
+
+    let mark = out.len();
+
+    if let Some((before, after)) = alike(old, new) {
+        let stirred = before
+            .iter()
+            .zip(after)
+            .any(|(was, now)| diff(was, now, out));
+
+        if !stirred {
+            return false;
+        }
+
+        out.truncate(mark);
+    }
+
+    match named(new) {
+        Some(id) => {
+            out.push((id.to_string(), render(new)));
+
+            false
+        }
+        None => true,
+    }
+}
+
+fn alike<'a>(old: &'a Html, new: &'a Html) -> Option<(&'a [Html], &'a [Html])> {
+    let (
+        Html::Tag { name: was, attrs: had, kids: before },
+        Html::Tag { name: now, attrs: has, kids: after },
+    ) = (old, new)
+    else {
+        return None;
+    };
+
+    let same = was == now && had == has && before.len() == after.len();
+
+    same.then_some((before.as_slice(), after.as_slice()))
+}
+
+fn named(node: &Html) -> Option<&str> {
+    match node {
+        Html::Tag { attrs, .. } => attrs
+            .iter()
+            .find(|(name, _)| name == "id")
+            .map(|(_, value)| value.as_str()),
+        Html::Leaf { id, .. } => Some(id),
+    }
+}
+
+fn write(node: &Html, out: &mut String) {
+    let (name, attrs, kids) = match node {
+        Html::Leaf { body, .. } => return out.push_str(body),
+        Html::Tag { name, attrs, kids } => (name, attrs, kids),
+    };
+
+    out.push('<');
+    out.push_str(name);
+
+    for (key, value) in attrs {
+        out.push(' ');
+        out.push_str(key);
+        out.push_str("=\"");
+        quote(value, out);
+        out.push('"');
+    }
+
+    out.push('>');
+
+    if VOID.contains(&name.as_str()) {
+        return;
+    }
+
+    for kid in kids {
+        write(kid, out);
+    }
+
+    out.push_str("</");
+    out.push_str(name);
+    out.push('>');
+}
+
+fn quote(text: &str, out: &mut String) {
+    for one in text.chars() {
+        match one {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(one),
+        }
+    }
 }

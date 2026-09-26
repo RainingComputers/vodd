@@ -9,14 +9,5 @@
   "bracketSpacing": true,
   "bracketSameLine": false,
   "arrowParens": "always",
-  "endOfLine": "lf",
-  "overrides": [
-    {
-      "files": ["src/templates/*.html"],
-      "options": {
-        "parser": "jinja-template",
-        "plugins": ["prettier-plugin-jinja-template"]
-      }
-    }
-  ]
+  "endOfLine": "lf"
 }

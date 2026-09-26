@@ -17,6 +17,7 @@ pub mod interpreter;
 pub mod logger;
 pub mod parser;
 pub mod platform;
+pub mod state;
 pub mod sys;
 pub mod templates;
 pub mod value;

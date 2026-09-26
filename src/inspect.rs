@@ -2,13 +2,11 @@ use crate::bitcode;
 use crate::detectors;
 use crate::interpreter;
 
-use serde::Serialize;
-
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Site {
     pub file: String,
     pub line: u32,
@@ -22,8 +20,7 @@ impl fmt::Display for Site {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Life {
     Pending,
     Running,
@@ -31,8 +28,7 @@ pub enum Life {
     Done,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Uniform,
     Affine,
@@ -55,14 +51,13 @@ pub struct Frame {
     pub at: Option<Site>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Error,
     Warning,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Detail {
     pub label: String,
     pub value: String,
