@@ -130,17 +130,9 @@ impl From<address::Invalid> for Error {
     }
 }
 
-// TODO: this might be a smell
 impl From<interpreter::Error> for Error {
     fn from(error: interpreter::Error) -> Error {
         trap(error)
-    }
-}
-
-// TODO: logging for these error has to go in debugger.rs
-impl From<debugger::Error> for Error {
-    fn from(error: debugger::Error) -> Error {
-        Error::OutOfResources
     }
 }
 
@@ -1442,7 +1434,7 @@ impl CommandQueue {
             snapshot.source.clone(),
             grid.local,
             grid.work_group_count(),
-        )?;
+        );
 
         let launch = Launch::from_snapshot(snapshot, handle);
 
@@ -2577,7 +2569,7 @@ impl Launch {
     }
 
     fn run(&self, geometry: &Grid) -> Result<()> {
-        let (arguments, mut global_storage) = self.bind()?;
+        let (arguments, mut global_storage) = bind(&self.arguments, &self.local_arg_addresses)?;
         let group_counts = geometry.work_group_count();
         let mut local_storage = self.local_storage.clone();
 
@@ -2616,60 +2608,6 @@ impl Launch {
         Ok(())
     }
 
-    fn bind(
-        &self,
-    ) -> Result<(
-        Vec<interpreter::Argument>,
-        address::UnsafeSharedRawPtrStorage<detectors::Permissions>,
-    )> {
-        fn permissions(buffer: &Buffer) -> detectors::Permissions {
-            detectors::Permissions {
-                reads: buffer.flags.access != Access::WriteOnly,
-                writes: buffer.flags.access != Access::ReadOnly,
-                mappings: buffer
-                    .maps
-                    .iter()
-                    .map(|(at, size, flags)| detectors::Mapping {
-                        at: *at,
-                        size: *size,
-                        writable: flags.writes(),
-                    })
-                    .collect(),
-            }
-        }
-
-        let mut buffers = BUFFERS.lock().expect("buffers");
-        let mut global_storage = address::UnsafeSharedRawPtrStorage::new(address::Region::Global);
-
-        let arguments = self
-            .arguments
-            .iter()
-            .zip(&self.local_arg_addresses)
-            .map(|(argument, local_address)| {
-                Ok(match argument {
-                    KernelArgument::Memory(None) => interpreter::Argument::Buffer(0),
-                    KernelArgument::Memory(Some(id)) => {
-                        let buffer = buffers.get_mut(id).ok_or(Error::InvalidMemObject)?;
-                        let address = unsafe {
-                            global_storage.borrow(
-                                buffer.base().as_ptr(),
-                                buffer.size as u64,
-                                permissions(buffer),
-                            )
-                        }
-                        .ok_or(Error::OutOfResources)?;
-
-                        interpreter::Argument::Buffer(address)
-                    }
-                    KernelArgument::Local(_) => interpreter::Argument::Buffer(*local_address),
-                    KernelArgument::Value(bytes) => interpreter::Argument::Value(bytes.clone()),
-                })
-            })
-            .collect::<Result<Vec<interpreter::Argument>>>()?;
-
-        Ok((arguments, global_storage))
-    }
-
     fn run_group(&self, ctx: &mut GroupRunContext<'_>) -> Result<()> {
         let work_group_size = ctx.geometry.work_group_size();
         let index = index_of(ctx.geometry.work_group_count(), ctx.group);
@@ -2687,7 +2625,7 @@ impl Launch {
                 self.handle.stepped(index, &items, &progress)?;
             }
 
-            if progress.iter().any(|held| held.is_ready()) {
+            if progress.iter().any(|item| item.is_ready()) {
                 continue;
             }
 
@@ -2747,36 +2685,6 @@ impl Launch {
         Ok(ran)
     }
 
-    fn release(
-        &self,
-        ctx: &mut GroupRunContext<'_>,
-        barriers: &mut detectors::BarrierDetector,
-        progress: &mut [inspect::Progress],
-    ) -> bool {
-        let counts = ctx.geometry.work_group_count();
-
-        if let Some(diagnostic) = barriers.released() {
-            self.report(counts, diagnostic, None);
-        }
-
-        if let Some(semantics) = barriers.fold() {
-            for diagnostic in ctx.races.barrier(semantics) {
-                self.report(counts, diagnostic, None);
-            }
-        }
-
-        let mut freed = false;
-
-        for (lane, held) in progress.iter_mut().enumerate() {
-            if barriers.release(lane) {
-                *held = inspect::Progress::Ready;
-                freed = true;
-            }
-        }
-
-        freed
-    }
-
     fn run_item(
         &self,
         ctx: &mut GroupRunContext<'_>,
@@ -2790,7 +2698,6 @@ impl Launch {
         loop {
             let yield_ = match item.resume(reply) {
                 Ok(yield_) => yield_,
-                // TODO: should this even be handled like this
                 Err(error) => return Err(self.trapped(item.location(), error)),
             };
 
@@ -2834,6 +2741,36 @@ impl Launch {
                 Err(error) => return Err(self.faulted(item.location(), error)),
             }
         }
+    }
+
+    fn release(
+        &self,
+        ctx: &mut GroupRunContext<'_>,
+        barriers: &mut detectors::BarrierDetector,
+        progress: &mut [inspect::Progress],
+    ) -> bool {
+        let counts = ctx.geometry.work_group_count();
+
+        if let Some(diagnostic) = barriers.released() {
+            self.report(counts, diagnostic, None);
+        }
+
+        if let Some(semantics) = barriers.fold() {
+            for diagnostic in ctx.races.barrier(semantics) {
+                self.report(counts, diagnostic, None);
+            }
+        }
+
+        let mut freed = false;
+
+        for (lane, item) in progress.iter_mut().enumerate() {
+            if barriers.release(lane) {
+                *item = inspect::Progress::Ready;
+                freed = true;
+            }
+        }
+
+        freed
     }
 
     fn report(
@@ -2890,6 +2827,60 @@ impl Launch {
     }
 }
 
+fn bind(
+    arguments: &[KernelArgument],
+    local_addresses: &[u64],
+) -> Result<(
+    Vec<interpreter::Argument>,
+    address::UnsafeSharedRawPtrStorage<detectors::Permissions>,
+)> {
+    fn permissions(buffer: &Buffer) -> detectors::Permissions {
+        detectors::Permissions {
+            reads: buffer.flags.access != Access::WriteOnly,
+            writes: buffer.flags.access != Access::ReadOnly,
+            mappings: buffer
+                .maps
+                .iter()
+                .map(|(at, size, flags)| detectors::Mapping {
+                    at: *at,
+                    size: *size,
+                    writable: flags.writes(),
+                })
+                .collect(),
+        }
+    }
+
+    let mut buffers = BUFFERS.lock().expect("buffers");
+    let mut global_storage = address::UnsafeSharedRawPtrStorage::new(address::Region::Global);
+
+    let arguments = arguments
+        .iter()
+        .zip(local_addresses)
+        .map(|(argument, local_address)| {
+            Ok(match argument {
+                KernelArgument::Memory(None) => interpreter::Argument::Buffer(0),
+                KernelArgument::Memory(Some(id)) => {
+                    let buffer = buffers.get_mut(id).ok_or(Error::InvalidMemObject)?;
+                    let address = unsafe {
+                        global_storage.borrow(
+                            buffer.base().as_ptr(),
+                            buffer.size as u64,
+                            permissions(buffer),
+                        )
+                    }
+                    .ok_or(Error::OutOfResources)?;
+
+                    interpreter::Argument::Buffer(address)
+                }
+                KernelArgument::Local(_) => interpreter::Argument::Buffer(*local_address),
+                KernelArgument::Value(bytes) => interpreter::Argument::Value(bytes.clone()),
+            })
+        })
+        .collect::<Result<Vec<interpreter::Argument>>>()?;
+
+    Ok((arguments, global_storage))
+}
+
 fn groups(counts: [u64; 3]) -> impl Iterator<Item = [u64; 3]> {
     (0..counts[2])
         .flat_map(move |z| (0..counts[1]).flat_map(move |y| (0..counts[0]).map(move |x| [x, y, z])))
@@ -2897,25 +2888,6 @@ fn groups(counts: [u64; 3]) -> impl Iterator<Item = [u64; 3]> {
 
 fn index_of(counts: [u64; 3], group: [u64; 3]) -> u64 {
     (group[2] * counts[1] + group[1]) * counts[0] + group[0]
-}
-
-fn group_of(diagnostic: &detectors::Diagnostic) -> [u64; 3] {
-    diagnostic
-        .entity
-        .map(|entity| entity.group)
-        .unwrap_or([0, 0, 0])
-}
-
-// TODO: this function might be a smell
-fn trap(error: interpreter::Error) -> Error {
-    match error {
-        interpreter::Error::OutOfFuel
-        | interpreter::Error::OutOfBounds
-        | interpreter::Error::InvalidAddress
-        | interpreter::Error::ReadOnlyRegion
-        | interpreter::Error::UnsupportedRegion => Error::OutOfResources,
-        _ => Error::InvalidProgramExecutable,
-    }
 }
 
 fn entity_of(geometry: &Grid, group: [u64; 3], lane: usize) -> detectors::Entity {
@@ -3154,6 +3126,34 @@ fn signed(bits: u64, width: u32) -> i64 {
     let shift = 64 - width.min(64);
 
     ((bits << shift) as i64) >> shift
+}
+
+fn group_of(diagnostic: &detectors::Diagnostic) -> [u64; 3] {
+    diagnostic
+        .entity
+        .map(|entity| entity.group)
+        .unwrap_or([0, 0, 0])
+}
+
+fn trap(error: interpreter::Error) -> Error {
+    match error {
+        interpreter::Error::OutOfFuel
+        | interpreter::Error::OutOfSlots
+        | interpreter::Error::OutOfBounds
+        | interpreter::Error::InvalidAddress
+        | interpreter::Error::ReadOnlyRegion
+        | interpreter::Error::UnsupportedRegion
+        | interpreter::Error::NoFrame
+        | interpreter::Error::UnexpectedResume => Error::OutOfResources,
+
+        interpreter::Error::Bitcode(_)
+        | interpreter::Error::Value(_)
+        | interpreter::Error::UnboundValue(_)
+        | interpreter::Error::ArgumentMismatch
+        | interpreter::Error::Unreachable
+        | interpreter::Error::EndOfBlock
+        | interpreter::Error::NoPredecessor => Error::InvalidProgramExecutable,
+    }
 }
 
 pub struct Buffer {

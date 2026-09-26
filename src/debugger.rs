@@ -10,9 +10,11 @@ use serde::Serialize;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::convert::Infallible;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
@@ -24,16 +26,12 @@ use std::sync::mpsc::sync_channel;
 use std::time::Duration;
 
 static SESSION: Mutex<Option<Sender<Message>>> = Mutex::new(None);
+static TRIED: AtomicBool = AtomicBool::new(false);
 static NEXT_HANDLE: AtomicU32 = AtomicU32::new(1);
 
 const MAX_DIAGNOSTICS: usize = 64;
 const MAX_RESIDENT: usize = 1024;
 const TICK: Duration = Duration::from_millis(50);
-
-#[derive(Debug)]
-pub enum Error {
-    Listen(String),
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -207,9 +205,9 @@ pub enum Update {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Flow {
-    Go,
-    Detail,
+enum Next {
+    Carry,
+    Locals,
 }
 
 enum Pick {
@@ -225,7 +223,7 @@ enum Message {
     Open(u32, Box<Pane>),
     Linger(SyncSender<()>),
     Change(u32, Box<Update>),
-    Wait(u32, Option<Box<Update>>, SyncSender<Flow>),
+    Wait(u32, Option<Box<Update>>, SyncSender<Next>),
     Close(u32),
     Leave(u64),
     Draw(templates::Fragment, usize, SyncSender<String>),
@@ -253,11 +251,11 @@ impl Handle {
         source: Option<Arc<String>>,
         local: [u64; 3],
         counts: [u64; 3],
-    ) -> Result<Handle, Error> {
+    ) -> Handle {
         let inspect = inspect::Inspector::new(module, source.clone());
 
-        let Some(post) = session()? else {
-            return Ok(Handle { link: None, inspect });
+        let Some(post) = session() else {
+            return Handle { link: None, inspect };
         };
 
         let id = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
@@ -273,31 +271,11 @@ impl Handle {
             Err(_) => None,
         };
 
-        Ok(Handle { link, inspect })
-    }
-
-    pub fn attached(&self) -> bool {
-        self.link.is_some()
-    }
-
-    pub fn started(&self) {
-        self.update(Update::Started);
-    }
-
-    pub fn finished(&self) {
-        self.update(Update::Finished);
-    }
-
-    pub fn aborted(&self) {
-        self.update(Update::Aborted);
-    }
-
-    pub fn rest(&self) {
-        let _flow = self.halt(None);
+        Handle { link, inspect }
     }
 
     pub fn linger() {
-        let Ok(Some(post)) = session() else {
+        let Some(post) = session() else {
             return;
         };
 
@@ -308,13 +286,39 @@ impl Handle {
         }
     }
 
+    pub fn attached(&self) -> bool {
+        self.link.is_some()
+    }
+
+    pub fn started(&self) {
+        let Ok(()) = self.update(|| Ok::<_, Infallible>(Update::Started));
+    }
+
+    pub fn finished(&self) {
+        let Ok(()) = self.update(|| Ok::<_, Infallible>(Update::Finished));
+    }
+
+    pub fn aborted(&self) {
+        let Ok(()) = self.update(|| Ok::<_, Infallible>(Update::Aborted));
+    }
+
+    pub fn rest(&self) {
+        let Ok(_next) = self.halt(|| Ok::<_, Infallible>(None));
+    }
+
     pub fn opened(
         &self,
         index: u64,
         items: &[interpreter::Interpreter],
         lanes: &[inspect::Progress],
     ) -> Result<(), interpreter::Error> {
-        self.snapshot(index, items, lanes, inspect::Depth::Detailed)
+        self.update(|| {
+            Ok(Update::Group {
+                index,
+                lanes: self.inspect.lanes(items, lanes, inspect::Depth::Detailed)?,
+                depth: inspect::Depth::Detailed,
+            })
+        })
     }
 
     pub fn stepped(
@@ -323,24 +327,22 @@ impl Handle {
         items: &[interpreter::Interpreter],
         lanes: &[inspect::Progress],
     ) -> Result<(), interpreter::Error> {
-        if !self.attached() {
-            return Ok(());
-        }
-
-        let brief = Update::Group {
-            index,
-            lanes: self.inspect.lanes(items, lanes, inspect::Depth::Brief)?,
-            depth: inspect::Depth::Brief,
-        };
-
-        if self.halt(Some(brief)) == Flow::Detail {
-            let full = Update::Group {
+        let brief = self.halt::<interpreter::Error>(|| {
+            Ok(Some(Update::Group {
                 index,
-                lanes: self.inspect.lanes(items, lanes, inspect::Depth::Detailed)?,
-                depth: inspect::Depth::Detailed,
-            };
+                lanes: self.inspect.lanes(items, lanes, inspect::Depth::Brief)?,
+                depth: inspect::Depth::Brief,
+            }))
+        })?;
 
-            self.halt(Some(full));
+        if brief == Next::Locals {
+            self.halt::<interpreter::Error>(|| {
+                Ok(Some(Update::Group {
+                    index,
+                    lanes: self.inspect.lanes(items, lanes, inspect::Depth::Detailed)?,
+                    depth: inspect::Depth::Detailed,
+                }))
+            })?;
         }
 
         Ok(())
@@ -352,7 +354,13 @@ impl Handle {
         items: &[interpreter::Interpreter],
         lanes: &[inspect::Progress],
     ) -> Result<(), interpreter::Error> {
-        self.snapshot(index, items, lanes, inspect::Depth::Ended)
+        self.update(|| {
+            Ok(Update::Group {
+                index,
+                lanes: self.inspect.lanes(items, lanes, inspect::Depth::Ended)?,
+                depth: inspect::Depth::Ended,
+            })
+        })
     }
 
     pub fn report(
@@ -361,72 +369,55 @@ impl Handle {
         item: Option<&interpreter::Interpreter>,
         group: u64,
     ) {
-        if !self.attached() {
-            return;
-        }
-
-        let report = self.inspect.annotate(diagnostic, item, group);
-
-        self.update(Update::Reported(Box::new(report)));
+        let Ok(()) = self.update(|| {
+            Ok::<_, Infallible>(Update::Reported(Box::new(
+                self.inspect.annotate(diagnostic, item, group),
+            )))
+        });
     }
 
     pub fn trapped(&self, location: Option<bitcode::Location>, error: &dyn fmt::Debug) {
-        self.faltered(location, "trapped", error);
+        let Ok(()) = self.update(|| {
+            Ok::<_, Infallible>(Update::Trapped {
+                at: self.inspect.site(location),
+                detail: format!("kernel trapped: {error:?}"),
+            })
+        });
     }
 
     pub fn faulted(&self, location: Option<bitcode::Location>, error: &dyn fmt::Debug) {
-        self.faltered(location, "faulted", error);
+        let Ok(()) = self.update(|| {
+            Ok::<_, Infallible>(Update::Trapped {
+                at: self.inspect.site(location),
+                detail: format!("kernel faulted: {error:?}"),
+            })
+        });
     }
 
-    fn halt(&self, update: Option<Update>) -> Flow {
+    fn halt<E>(&self, make: impl FnOnce() -> Result<Option<Update>, E>) -> Result<Next, E> {
         let Some(link) = &self.link else {
-            return Flow::Go;
+            return Ok(Next::Carry);
         };
 
         let (reply, answer) = sync_channel(1);
 
         match link
             .post
-            .send(Message::Wait(link.id, update.map(Box::new), reply))
+            .send(Message::Wait(link.id, make()?.map(Box::new), reply))
         {
-            Ok(()) => answer.recv().unwrap_or(Flow::Go),
-            Err(_) => Flow::Go,
+            Ok(()) => Ok(answer.recv().unwrap_or(Next::Carry)),
+            Err(_) => Ok(Next::Carry),
         }
     }
 
-    fn snapshot(
-        &self,
-        index: u64,
-        items: &[interpreter::Interpreter],
-        lanes: &[inspect::Progress],
-        depth: inspect::Depth,
-    ) -> Result<(), interpreter::Error> {
-        if !self.attached() {
-            return Ok(());
-        }
-
-        self.update(Update::Group {
-            index,
-            lanes: self.inspect.lanes(items, lanes, depth)?,
-            depth,
-        });
-
-        Ok(())
-    }
-
-    fn faltered(&self, location: Option<bitcode::Location>, verb: &str, error: &dyn fmt::Debug) {
-        self.update(Update::Trapped {
-            at: self.inspect.site(location),
-            detail: format!("kernel {verb}: {error:?}"),
-        });
-    }
-
-    fn update(&self, update: Update) {
+    fn update<E>(&self, make: impl FnOnce() -> Result<Update, E>) -> Result<(), E> {
         let Some(link) = &self.link else {
-            return;
+            return Ok(());
         };
 
-        let _posted = link.post.send(Message::Change(link.id, Box::new(update)));
+        let _posted = link.post.send(Message::Change(link.id, Box::new(make()?)));
+
+        Ok(())
     }
 }
 
@@ -468,7 +459,7 @@ struct Session {
     suppressed: Vec<bool>,
     breaks: Vec<BTreeSet<u32>>,
     depth: Vec<usize>,
-    parked: BTreeMap<u32, Vec<SyncSender<Flow>>>,
+    parked: BTreeMap<u32, Vec<SyncSender<Next>>>,
     lingering: Vec<SyncSender<()>>,
     releasing: bool,
     media: hypermedia::Hypermedia<templates::Fragment>,
@@ -565,7 +556,7 @@ impl Session {
     }
 
     fn close(&mut self, id: u32) {
-        self.release(id, Flow::Go);
+        self.release(id, Next::Carry);
         self.stepping.remove(&id);
 
         let Some(at) = self.tab_of.remove(&id) else {
@@ -652,9 +643,9 @@ impl Session {
             .is_some_and(|running| *running == self.model.focus[at].group)
     }
 
-    fn hold(&mut self, id: u32, struck: bool, detailed: bool, reply: SyncSender<Flow>) {
+    fn hold(&mut self, id: u32, struck: bool, detailed: bool, reply: SyncSender<Next>) {
         let Some(at) = self.tab_of.get(&id).copied() else {
-            let _sent = reply.send(Flow::Go);
+            let _sent = reply.send(Next::Carry);
             return;
         };
 
@@ -667,7 +658,7 @@ impl Session {
         if !held && !self.watching(at) {
             self.running(at);
 
-            let _sent = reply.send(Flow::Go);
+            let _sent = reply.send(Next::Carry);
             return;
         }
 
@@ -675,7 +666,7 @@ impl Session {
         let arriving = !held && (struck || stepping);
 
         if arriving && !detailed {
-            let _sent = reply.send(Flow::Detail);
+            let _sent = reply.send(Next::Locals);
             return;
         }
 
@@ -691,21 +682,21 @@ impl Session {
         let holding = matches!(self.model.tabs[at].state, State::Paused | State::Finished);
 
         if !holding {
-            let _sent = reply.send(Flow::Go);
+            let _sent = reply.send(Next::Carry);
             return;
         }
 
         if !detailed {
-            let _sent = reply.send(Flow::Detail);
+            let _sent = reply.send(Next::Locals);
             return;
         }
 
         self.parked.entry(id).or_default().push(reply);
     }
 
-    fn release(&mut self, id: u32, flow: Flow) {
+    fn release(&mut self, id: u32, next: Next) {
         for reply in self.parked.remove(&id).unwrap_or_default() {
-            let _sent = reply.send(flow);
+            let _sent = reply.send(next);
         }
     }
 
@@ -728,7 +719,7 @@ impl Session {
                 let _sent = reply.send(());
             }
 
-            self.release(id, Flow::Go);
+            self.release(id, Next::Carry);
 
             return;
         }
@@ -736,7 +727,7 @@ impl Session {
         self.stepping.insert(id, control == Control::Step);
         self.model.tabs[at].state = State::Running;
         self.settle(at);
-        self.release(id, Flow::Go);
+        self.release(id, Next::Carry);
 
         self.soil(at, templates::Fragment::Status);
         self.soil(at, templates::Fragment::Source);
@@ -1226,19 +1217,29 @@ impl Server {
     }
 }
 
-fn session() -> Result<Option<Sender<Message>>, Error> {
+fn session() -> Option<Sender<Message>> {
     let mut session = SESSION.lock().expect("session");
 
     if let Some(post) = session.as_ref() {
-        return Ok(Some(post.clone()));
+        return Some(post.clone());
     }
 
-    let Some(address) = address() else {
-        return Ok(None);
-    };
+    if TRIED.swap(true, Ordering::Relaxed) {
+        return None;
+    }
 
-    let socket = hypermedia::Socket::bind(&address)
-        .map_err(|error| Error::Listen(format!("{address}: {error}")))?;
+    let address = address()?;
+
+    let socket = match hypermedia::Socket::bind(&address) {
+        Ok(socket) => socket,
+        Err(error) => {
+            logger::log(&format!(
+                "the debugger could not listen on {address}, {error}"
+            ));
+
+            return None;
+        }
+    };
 
     let (post, inbox) = channel();
 
@@ -1253,7 +1254,7 @@ fn session() -> Result<Option<Sender<Message>>, Error> {
 
     *session = Some(post.clone());
 
-    Ok(Some(post))
+    Some(post)
 }
 
 fn address() -> Option<String> {
