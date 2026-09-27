@@ -1,3 +1,7 @@
+use crate::logger;
+use crate::logger::Level;
+
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -102,7 +106,7 @@ pub fn link(objects: &[Vec<u8>], library: bool) -> Result<Output> {
 
             std::fs::write(&path, object)
                 .map(|()| path)
-                .map_err(|_| Error::Staging)
+                .map_err(|error| staging("a linker input", error))
         })
         .collect::<Result<Vec<PathBuf>>>()?;
 
@@ -114,14 +118,10 @@ pub fn link(objects: &[Vec<u8>], library: bool) -> Result<Output> {
         command.arg("--create-library");
     }
 
-    let output = command.output().map_err(|_| Error::Spawn)?;
+    let output = command.output().map_err(|error| spawning(linker, error))?;
 
     let log = String::from_utf8_lossy(&output.stderr).into_owned();
-    let binary = output
-        .status
-        .success()
-        .then(|| std::fs::read(&produced).ok())
-        .flatten();
+    let binary = output.status.success().then(|| read(&produced)).flatten();
 
     Ok(Output { binary, log })
 }
@@ -140,21 +140,21 @@ pub fn compile(
         let path = scratch.path.join(name);
 
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|_| Error::Staging)?;
+            std::fs::create_dir_all(parent).map_err(|error| staging("a header", error))?;
         }
 
-        std::fs::write(path, text).map_err(|_| Error::Staging)
+        std::fs::write(path, text).map_err(|error| staging("a header", error))
     })?;
 
     let input = scratch.path.join("source.cl");
 
-    std::fs::write(&input, source).map_err(|_| Error::Staging)?;
+    std::fs::write(&input, source).map_err(|error| staging("the source", error))?;
 
     let prelude = match SUPPLIED.iter().any(|name| source.contains(name)) {
         true => {
             let path = scratch.path.join("prelude.h");
 
-            std::fs::write(&path, PRELUDE).map_err(|_| Error::Staging)?;
+            std::fs::write(&path, PRELUDE).map_err(|error| staging("the prelude", error))?;
 
             Some(path)
         }
@@ -179,7 +179,7 @@ pub fn compile(
         .arg(&emitted)
         .arg(&input)
         .output()
-        .map_err(|_| Error::Spawn)?;
+        .map_err(|error| spawning(clang, error))?;
 
     let mut log = String::from_utf8_lossy(&output.stderr).into_owned();
 
@@ -194,7 +194,7 @@ pub fn compile(
         .arg("--spirv-debug-info-version=nonsemantic-shader-200")
         .arg(format!("--spirv-max-version={SPIRV_VERSION}"))
         .output()
-        .map_err(|_| Error::Spawn)?;
+        .map_err(|error| spawning(translator, error))?;
 
     log.push_str(&String::from_utf8_lossy(&translated.stderr));
 
@@ -202,7 +202,7 @@ pub fn compile(
         return Ok(Output { binary: None, log });
     }
 
-    Ok(Output { binary: std::fs::read(&produced).ok(), log })
+    Ok(Output { binary: read(&produced), log })
 }
 
 fn arguments(options: &str, enable_opt: Option<bool>) -> Vec<String> {
@@ -234,7 +234,7 @@ impl Scratch {
         let unique = NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("vodd-{}-{unique}", std::process::id()));
 
-        std::fs::create_dir_all(&path).map_err(|_| Error::Staging)?;
+        std::fs::create_dir_all(&path).map_err(|error| staging("the scratch directory", error))?;
 
         Ok(Self { path })
     }
@@ -242,7 +242,15 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let _removed = std::fs::remove_dir_all(&self.path);
+        if let Err(error) = std::fs::remove_dir_all(&self.path) {
+            logger::log(
+                Level::Warn,
+                &format!(
+                    "the scratch directory {} could not be removed, {error}",
+                    self.path.display()
+                ),
+            );
+        }
     }
 }
 
@@ -274,14 +282,16 @@ pub fn requirements() -> String {
 fn linker() -> Option<&'static PathBuf> {
     LINKER
         .get_or_init(|| {
-            std::env::var("VODD_SPIRV_LINK")
+            let found = std::env::var("VODD_SPIRV_LINK")
                 .ok()
                 .map(PathBuf::from)
                 .into_iter()
                 .chain(LINKERS.iter().map(PathBuf::from))
                 .find(|candidate| {
                     linker_version(candidate).is_some_and(|found| found >= MINIMUM_LINKER)
-                })
+                });
+
+            announce("spirv-link", found, Level::Warn)
         })
         .as_ref()
 }
@@ -289,14 +299,16 @@ fn linker() -> Option<&'static PathBuf> {
 fn translator() -> Option<&'static PathBuf> {
     TRANSLATOR
         .get_or_init(|| {
-            std::env::var("VODD_LLVM_SPIRV")
+            let found = std::env::var("VODD_LLVM_SPIRV")
                 .ok()
                 .map(PathBuf::from)
                 .into_iter()
                 .chain(TRANSLATORS.iter().map(PathBuf::from))
                 .find(|candidate| {
                     major_version(candidate).is_some_and(|major| major >= MINIMUM_TRANSLATOR)
-                })
+                });
+
+            announce("llvm-spirv", found, Level::Error)
         })
         .as_ref()
 }
@@ -304,7 +316,7 @@ fn translator() -> Option<&'static PathBuf> {
 fn clang() -> Option<&'static PathBuf> {
     CLANG
         .get_or_init(|| {
-            std::env::var("VODD_CLANG")
+            let found = std::env::var("VODD_CLANG")
                 .ok()
                 .map(PathBuf::from)
                 .into_iter()
@@ -312,7 +324,9 @@ fn clang() -> Option<&'static PathBuf> {
                 .find(|candidate| {
                     major_version(candidate).is_some_and(|major| major >= MINIMUM_CLANG)
                         && emits_spirv(candidate)
-                })
+                });
+
+            announce("clang", found, Level::Error)
         })
         .as_ref()
 }
@@ -341,6 +355,47 @@ fn major_version(tool: &PathBuf) -> Option<u32> {
         .collect();
 
     digits.parse().ok()
+}
+
+fn announce(tool: &str, found: Option<PathBuf>, absent: Level) -> Option<PathBuf> {
+    match &found {
+        Some(path) => logger::log(Level::Info, &format!("using {tool} at {}", path.display())),
+        None => logger::log(absent, &format!("no usable {tool} was found")),
+    }
+
+    found
+}
+
+fn staging(what: &str, error: std::io::Error) -> Error {
+    logger::log(
+        Level::Error,
+        &format!("{what} could not be written to the scratch directory, {error}"),
+    );
+
+    Error::Staging
+}
+
+fn spawning(tool: &Path, error: std::io::Error) -> Error {
+    logger::log(
+        Level::Error,
+        &format!("{} could not be run, {error}", tool.display()),
+    );
+
+    Error::Spawn
+}
+
+fn read(path: &Path) -> Option<Vec<u8>> {
+    std::fs::read(path)
+        .inspect_err(|error| {
+            logger::log(
+                Level::Error,
+                &format!(
+                    "{} was reported as written but could not be read, {error}",
+                    path.display()
+                ),
+            );
+        })
+        .ok()
 }
 
 fn describe(major: Option<u32>) -> String {

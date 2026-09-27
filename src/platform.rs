@@ -6,6 +6,7 @@ use crate::detectors;
 use crate::inspect;
 use crate::interpreter;
 use crate::logger;
+use crate::logger::Level;
 use crate::parser;
 
 use std::collections::BTreeMap;
@@ -119,7 +120,19 @@ pub enum Error {
 }
 
 impl From<detectors::EnvError> for Error {
-    fn from(_: detectors::EnvError) -> Error {
+    fn from(error: detectors::EnvError) -> Error {
+        logger::log(
+            Level::Error,
+            &match error {
+                detectors::EnvError::NotUnicode(name) => {
+                    format!("{name} is not valid unicode")
+                }
+                detectors::EnvError::UnknownCheck(check) => {
+                    format!("VODD_CHECK does not have a check named {check}")
+                }
+            },
+        );
+
         Error::InvalidValue
     }
 }
@@ -2782,7 +2795,13 @@ impl Launch {
         let message = format!("{}: {diagnostic}", self.located(diagnostic.location));
         let group = index_of(counts, group_of(&diagnostic));
 
-        logger::log(&message);
+        logger::log(
+            match diagnostic.severity {
+                detectors::Severity::Error => Level::Error,
+                detectors::Severity::Warning => Level::Warn,
+            },
+            &message,
+        );
         Context::report(self.context, &message);
 
         self.handle.report(&diagnostic, item, group);
@@ -3756,11 +3775,11 @@ fn step() -> bool {
     };
 
     for buffer in enqueued.command.buffers() {
-        let _released = Buffer::release(buffer);
+        released("a buffer", Buffer::release(buffer));
     }
 
     for waited in &enqueued.wait {
-        let _released = Event::release(*waited);
+        released("an awaited event", Event::release(*waited));
     }
 
     Event::stamp(enqueued.event, ProfilingInfo::End);
@@ -3772,7 +3791,7 @@ fn step() -> bool {
     }
 
     Event::set_status(enqueued.event, status);
-    let _released = Event::release(enqueued.event);
+    released("a completed event", Event::release(enqueued.event));
 
     if let Some(queue) = QUEUES.lock().expect("queues").get_mut(&queue) {
         queue.running = false;
@@ -3781,6 +3800,15 @@ fn step() -> bool {
     signal_progress();
 
     true
+}
+
+fn released(what: &str, result: Result<()>) {
+    if let Err(error) = result {
+        logger::log(
+            Level::Warn,
+            &format!("{what} could not be released, {error:?}"),
+        );
+    }
 }
 
 fn take_ready() -> Option<(QueueId, Enqueued, Option<Status>)> {

@@ -1,4 +1,5 @@
 use crate::consts;
+use crate::logger;
 use crate::platform;
 use crate::sys;
 use std::ffi::CString;
@@ -1071,7 +1072,12 @@ pub(crate) unsafe fn created(
 
     if out.is_null() {
         for id in kernels {
-            let _released = platform::Kernel::release(id);
+            if let Err(error) = platform::Kernel::release(id) {
+                logger::log(
+                    logger::Level::Warn,
+                    &format!("a kernel could not be released after a failed create, {error:?}"),
+                );
+            }
         }
     }
 
@@ -1180,7 +1186,12 @@ pub(crate) unsafe fn map(
 
 unsafe fn deliver_event(id: platform::EventId, event: *mut sys::cl_event) {
     if event.is_null() {
-        let _released = platform::Event::release(id);
+        if let Err(error) = platform::Event::release(id) {
+            logger::log(
+                logger::Level::Warn,
+                &format!("an event could not be released after a failed enqueue, {error:?}"),
+            );
+        }
     } else {
         unsafe { *event = object_handle(id.into_raw()) };
     }

@@ -4,6 +4,7 @@ use crate::hypermedia;
 use crate::inspect;
 use crate::interpreter;
 use crate::logger;
+use crate::logger::Level;
 use crate::state;
 use crate::state::Change;
 use crate::state::Control;
@@ -71,8 +72,13 @@ impl Handle {
 
         let (reply, answer) = sync_channel(1);
 
-        if post.post(Change::Linger(reply)) {
-            let _parked = answer.recv();
+        if post.post(Change::Linger(reply))
+            && let Err(error) = answer.recv()
+        {
+            logger::log(
+                Level::Warn,
+                &format!("the debugger stopped before the program could wait for it, {error}"),
+            );
         }
     }
 
@@ -192,8 +198,22 @@ impl Handle {
         let (reply, answer) = sync_channel(1);
 
         match link.post.post(Change::Wait(link.id, make()?, reply)) {
-            true => Ok(answer.recv().unwrap_or(Next::Carry)),
-            false => Ok(Next::Carry),
+            true => Ok(answer.recv().unwrap_or_else(|error| {
+                logger::log(
+                    Level::Warn,
+                    &format!("the debugger stopped answering, the kernel will continue, {error}"),
+                );
+
+                Next::Carry
+            })),
+            false => {
+                logger::log(
+                    Level::Warn,
+                    "the debugger is gone, the kernel will continue without it",
+                );
+
+                Ok(Next::Carry)
+            }
         }
     }
 
@@ -202,7 +222,12 @@ impl Handle {
             return Ok(());
         };
 
-        let _posted = link.post.post(Change::Update(link.id, make()?));
+        if !link.post.post(Change::Update(link.id, make()?)) {
+            logger::log(
+                Level::Warn,
+                "a kernel update was dropped, the debugger is no longer listening",
+            );
+        }
 
         Ok(())
     }
@@ -214,7 +239,12 @@ impl Drop for Handle {
             return;
         };
 
-        let _posted = link.post.post(Change::Close(link.id));
+        if !link.post.post(Change::Close(link.id)) {
+            logger::log(
+                Level::Warn,
+                "a launch could not be closed, the debugger is no longer listening",
+            );
+        }
     }
 }
 
@@ -235,15 +265,16 @@ fn session() -> Option<hypermedia::Server<Change>> {
         match hypermedia::Server::new("vodd-debugger", &address, State::default(), config()) {
             Ok(server) => server,
             Err(error) => {
-                logger::log(&format!(
-                    "the debugger could not listen on {address}, {error}"
-                ));
+                logger::log(
+                    Level::Error,
+                    &format!("the debugger could not listen on {address}, {error}"),
+                );
 
                 return None;
             }
         };
 
-    logger::log(&format!("debugger on http://{address}"));
+    logger::log(Level::Info, &format!("debugger on http://{address}"));
 
     *session = Some(server.clone());
 
@@ -272,14 +303,23 @@ fn after(state: State) -> (State, bool) {
 
     for sent in state.posted() {
         match sent {
-            Sent::Flow(reply, next) => drop(reply.send(next)),
-            Sent::Done(reply) => drop(reply.send(())),
+            Sent::Flow(reply, next) => replied(reply.send(next).is_ok()),
+            Sent::Done(reply) => replied(reply.send(()).is_ok()),
         }
     }
 
     let urgent = state.prompted() || state.resting();
 
     (state.prompt(false), urgent)
+}
+
+fn replied(sent: bool) {
+    if !sent {
+        logger::log(
+            Level::Info,
+            "a reply was ready but the kernel that asked for it had already gone",
+        );
+    }
 }
 
 fn draw(state: &State) -> hypermedia::Html {

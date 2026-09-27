@@ -8,10 +8,28 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 
+const PREFIX: &str = "vodd";
 const DEFAULT_MAX_ERRORS: u32 = 1000;
 
 static MAX_ERRORS: OnceLock<u32> = OnceLock::new();
 static EMITTED: AtomicU32 = AtomicU32::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    Info,
+    Warn,
+    Error,
+}
+
+impl fmt::Display for Level {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Level::Info => write!(formatter, "info"),
+            Level::Warn => write!(formatter, "warn"),
+            Level::Error => write!(formatter, "error"),
+        }
+    }
+}
 
 impl fmt::Display for bitcode::MemoryOrder {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -159,38 +177,55 @@ fn triple(value: [u64; 3]) -> String {
     format!("({}, {}, {})", value[0], value[1], value[2])
 }
 
-pub fn log(message: &str) {
-    let seen = EMITTED.fetch_add(1, Ordering::Relaxed);
-    let limit = max_errors();
-
-    if seen >= limit {
-        return;
-    }
-
-    write(message);
-
-    if seen + 1 == limit {
-        write(&format!(
-            "vodd: {limit} diagnostics reported, suppressing further output"
-        ));
+pub fn log(level: Level, message: &str) {
+    match level {
+        Level::Info => write(level, message),
+        Level::Warn | Level::Error => counted(level, message),
     }
 }
 
-fn write(message: &str) {
+fn counted(level: Level, message: &str) {
+    let seen = EMITTED.fetch_add(1, Ordering::Relaxed);
+    let limit = max_errors();
+
+    if seen < limit {
+        write(level, message);
+    }
+
+    if seen + 1 == limit {
+        write(
+            Level::Warn,
+            &format!("{limit} diagnostics reported, suppressing further output"),
+        );
+    }
+}
+
+fn write(level: Level, message: &str) {
     use std::io::Write;
 
-    match std::env::var("VODD_LOG").ok() {
-        Some(path) => {
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-            {
-                let _ = writeln!(file, "{message}");
-            }
+    let tag = format!("[{PREFIX} {level}] ");
+    let text = message.lines().fold(String::new(), |mut text, line| {
+        text.push_str(&tag);
+        text.push_str(line);
+        text.push('\n');
+
+        text
+    });
+
+    let file = std::env::var("VODD_LOG").ok().and_then(|path| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+    });
+
+    match file {
+        Some(mut file) => {
+            let _written = file.write_all(text.as_bytes());
         }
         None => {
-            let _ = writeln!(std::io::stderr(), "{message}");
+            let _written = std::io::stderr().write_all(text.as_bytes());
         }
     }
 }

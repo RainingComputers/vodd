@@ -1,9 +1,14 @@
+use crate::logger;
+use crate::logger::Level;
+
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::SendError;
 use std::sync::mpsc::Sender;
 use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::TrySendError;
 use std::sync::mpsc::channel;
 use std::sync::mpsc::sync_channel;
 use std::time::Duration;
@@ -73,14 +78,13 @@ impl Listeners {
     }
 
     fn post(&mut self, id: u64, piece: &str) {
-        self.subscribers.retain(|subscriber| {
-            subscriber.id != id || subscriber.post.try_send(piece.to_string()).is_ok()
-        });
+        self.subscribers
+            .retain(|subscriber| subscriber.id != id || delivered(subscriber, piece));
     }
 
     fn send(&mut self, piece: &str) {
         self.subscribers
-            .retain(|subscriber| subscriber.post.try_send(piece.to_string()).is_ok());
+            .retain(|subscriber| delivered(subscriber, piece));
     }
 }
 
@@ -132,7 +136,12 @@ impl Request {
         let path = url.split('?').next().unwrap_or_default().to_string();
 
         let mut body = String::new();
-        let _read = std::io::Read::read_to_string(wire.as_reader(), &mut body);
+        if let Err(error) = std::io::Read::read_to_string(wire.as_reader(), &mut body) {
+            logger::log(
+                Level::Warn,
+                &format!("the body of a request for {path} could not be read, {error}"),
+            );
+        }
 
         let form = body
             .split('&')
@@ -173,10 +182,17 @@ impl Request {
             .with_status_code(reply.code)
             .with_header(kind);
 
-        let _sent = self.wire.respond(answer);
+        if let Err(error) = self.wire.respond(answer) {
+            logger::log(
+                Level::Warn,
+                &format!("a reply to {} could not be sent, {error}", self.path),
+            );
+        }
     }
 
     pub fn feed(self, inbox: Receiver<String>) {
+        logger::log(Level::Info, "a browser opened the event stream");
+
         let mut writer = self.wire.into_writer();
         let mut alive = writer.write_all(STREAM.as_bytes()).is_ok();
 
@@ -187,6 +203,8 @@ impl Request {
 
             alive = writer.write_all(piece.as_bytes()).is_ok() && writer.flush().is_ok();
         }
+
+        logger::log(Level::Info, "a browser closed the event stream");
     }
 }
 
@@ -247,14 +265,14 @@ impl<C: Send + 'static> Server<C> {
             .spawn(move || run(inbox, state, config))
             .map_err(|error| error.to_string())?;
 
-        let held = Server { post: post.clone() };
+        let server = Server { post: post.clone() };
 
         std::thread::Builder::new()
             .name(format!("{name}-http"))
             .spawn(move || listen(listener, post, config))
             .map_err(|error| error.to_string())?;
 
-        Ok(held)
+        Ok(server)
     }
 
     pub fn post(&self, change: C) -> bool {
@@ -289,12 +307,12 @@ fn run<S, C>(inbox: Receiver<Wire<C>>, mut state: S, config: ServerConfig<S, C>)
     loop {
         match inbox.recv_timeout(TICK) {
             Ok(Wire::Change(change)) => state = (config.reduce)(state, change),
-            Ok(Wire::Shell(reply)) => drop(reply.send((config.shell)(&state))),
+            Ok(Wire::Shell(reply)) => answered("a page", reply.send((config.shell)(&state))),
             Ok(Wire::Leave(id)) => watchers.leave(id),
             Ok(Wire::Piece(id, reply)) => {
                 let body = find(&(config.draw)(&state), &id).map(render);
 
-                drop(reply.send(body));
+                answered("a fragment", reply.send(body));
             }
             Ok(Wire::Listen(reply)) => {
                 push(&state, config.draw, &mut watchers, &mut shown);
@@ -304,10 +322,17 @@ fn run<S, C>(inbox: Receiver<Wire<C>>, mut state: S, config: ServerConfig<S, C>)
                 let name = named(&shown).unwrap_or_default();
 
                 watchers.post(id, &event(name, &render(&shown)));
-                drop(reply.send((id, inbox)));
+                answered("an event stream", reply.send((id, inbox)));
             }
             Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Disconnected) => {
+                logger::log(
+                    Level::Warn,
+                    "every sender is gone, the state thread is stopping",
+                );
+
+                return;
+            }
         }
 
         let (next, urgent) = (config.after)(state);
@@ -369,7 +394,15 @@ fn answer<S, C>(post: &Sender<Wire<C>>, config: ServerConfig<S, C>, request: Req
             let (changes, reply) = (config.serve)(&request);
 
             for change in changes {
-                let _posted = post.send(Wire::Change(change));
+                if post.send(Wire::Change(change)).is_err() {
+                    logger::log(
+                        Level::Warn,
+                        &format!(
+                            "a change from {} was dropped, the state thread is gone",
+                            request.path()
+                        ),
+                    );
+                }
             }
 
             reply
@@ -394,7 +427,12 @@ fn stream<S, C>(post: &Sender<Wire<C>>, config: ServerConfig<S, C>, request: Req
 
     request.feed(inbox);
 
-    let _posted = post.send(Wire::Leave(id));
+    if post.send(Wire::Leave(id)).is_err() {
+        logger::log(
+            Level::Warn,
+            "a listener could not be retired, the state thread is gone",
+        );
+    }
 }
 
 fn ask<C, T: Send + 'static>(
@@ -405,7 +443,39 @@ fn ask<C, T: Send + 'static>(
 
     post.send(make(reply)).ok()?;
 
-    answer.recv().ok()
+    answer
+        .recv()
+        .inspect_err(|error| {
+            logger::log(
+                Level::Warn,
+                &format!("the state thread did not answer, {error}"),
+            );
+        })
+        .ok()
+}
+
+fn delivered(subscriber: &Subscriber, piece: &str) -> bool {
+    match subscriber.post.try_send(piece.to_string()) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) => {
+            logger::log(
+                Level::Warn,
+                "a browser fell behind the event stream and was dropped",
+            );
+
+            false
+        }
+        Err(TrySendError::Disconnected(_)) => false,
+    }
+}
+
+fn answered<T>(what: &str, sent: Result<(), SendError<T>>) {
+    if sent.is_err() {
+        logger::log(
+            Level::Info,
+            &format!("{what} was prepared but the request had already gone"),
+        );
+    }
 }
 
 fn asset(path: &str) -> Option<Reply> {
