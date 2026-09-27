@@ -1,15 +1,14 @@
 # vodd
 
-An OpenCL 1.2 driver with a SPIR-V interpreter and a debugger can you drive
-from the browser. This project takes heavy inspiration from
-[Oclgrind](https://github.com/jrprice/Oclgrind). The project aims to
-redesign the traditional debugger interface for debugging GPU kernels.
+An OpenCL 1.2 driver with a [SPIR-V](https://www.khronos.org/spirv/)
+interpreter and a browser based debugger for catching concurrency bugs in OpenCL kernels.
+This project takes heavy inspiration from [Oclgrind](https://github.com/jrprice/Oclgrind).
 
 Kernels run on an interpreter instead of hardware, so vodd can watch every
 memory access and report data races, barrier divergence and out of bounds
-reads while your OpenCL program runs.
+reads.
 
-<img src="docs/debugger-dark.png">
+<img src="docs/debugger-dark.gif">
 
 ## Getting started
 
@@ -31,7 +30,7 @@ is required.
 | llvm-spirv | 23      | carries the line information the debugger needs |
 | spirv-link | v2026.3 | only needed to link multiple programs           |
 
-The toolchain can be installed using Homebrew on both macOS and Linux.
+The toolchain can be installed using Homebrew on both macOS and Linux
 
 ```
 brew install llvm spirv-llvm-translator spirv-tools
@@ -52,7 +51,7 @@ This produces `target/release/libvodd.so`, or `libvodd.dylib` on macOS.
 
 ## Usage
 
-Run any OpenCL program against vodd by preloading the driver.
+Run any OpenCL program against vodd by preloading the driver
 
 ```
 LD_PRELOAD=./target/release/libvodd.so clinfo
@@ -67,8 +66,7 @@ cc my-program.c -Ltarget/release -lvodd -Wl,-rpath,$PWD/target/release
 ```
 
 On macOS, link directly. There is no `LD_PRELOAD`, and `DYLD_INSERT_LIBRARIES`
-does not divert calls away from the system OpenCL framework, so a program built
-against it keeps talking to Apple.
+does not divert calls away from the system OpenCL framework
 
 ```
 cc my-program.c -DCL_TARGET_OPENCL_VERSION=120 -Itests/vendor/OpenCL-Headers -Ltarget/release -lvodd
