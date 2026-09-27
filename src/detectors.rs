@@ -3,7 +3,12 @@ use crate::bitcode;
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::Relaxed;
 
 pub use crate::address::Invalid;
 
@@ -408,6 +413,29 @@ pub fn checked_write<T, E: From<address::Invalid>>(
     Ok((fallback()?, diagnostics))
 }
 
+pub fn checked_shared<T, E: From<address::Invalid>>(
+    storage: &address::SharedStorage,
+    checks: Checks,
+    access: Access,
+    apply: impl FnOnce(&[AtomicU8]) -> Result<T, E>,
+    fallback: impl FnOnce() -> Result<T, E>,
+) -> Result<(T, DiagnosticList), E> {
+    let mut diagnostics = DiagnosticList::new();
+
+    let reason = match storage.slice(access.address, access.size, access.atomic) {
+        Ok(slots) => return Ok((apply(&slots)?, diagnostics)),
+        Err(reason) => reason,
+    };
+
+    if !checks.memory {
+        return Err(reason.into());
+    }
+
+    diagnostics.extend(invalid_access(checks, access, reason));
+
+    Ok((fallback()?, diagnostics))
+}
+
 pub fn checked_buffer_read<T, E: From<address::Invalid>>(
     storage: &address::UnsafeSharedRawPtrStorage<Permissions>,
     checks: Checks,
@@ -437,7 +465,7 @@ pub fn checked_buffer_read<T, E: From<address::Invalid>>(
 }
 
 pub fn checked_buffer_write<T, E: From<address::Invalid>>(
-    storage: &mut address::UnsafeSharedRawPtrStorage<Permissions>,
+    storage: &address::UnsafeSharedRawPtrStorage<Permissions>,
     checks: Checks,
     access: Access,
     update: impl FnOnce(&mut [u8]) -> Result<T, E>,
@@ -448,6 +476,7 @@ pub fn checked_buffer_write<T, E: From<address::Invalid>>(
     let outcome = storage.write_with_metadata(
         access.address,
         access.size,
+        access.atomic,
         |permissions, offset, destination| {
             diagnostics.extend(access_flags(checks, access, permissions));
             diagnostics.extend(mapped_region(checks, access, offset, permissions));
@@ -467,91 +496,100 @@ pub fn checked_buffer_write<T, E: From<address::Invalid>>(
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug)]
 pub struct BarrierDetector {
     checks: Checks,
-    expected: Option<Barrier>,
-    parked: Vec<bool>,
-    pending: Option<bitcode::MemorySemantics>,
+    arrivals: Vec<Mutex<Option<Barrier>>>,
+    parked: Vec<AtomicBool>,
+    pending: Mutex<Option<bitcode::MemorySemantics>>,
 }
 
 impl BarrierDetector {
     pub fn new(checks: Checks, lanes: usize) -> BarrierDetector {
         BarrierDetector {
             checks,
-            expected: None,
-            parked: vec![false; lanes],
-            pending: None,
+            arrivals: (0..lanes).map(|_| Mutex::new(None)).collect(),
+            parked: (0..lanes).map(|_| AtomicBool::new(false)).collect(),
+            pending: Mutex::new(None),
         }
     }
 
     pub fn waiting(&self) -> usize {
-        self.parked.iter().filter(|waiting| **waiting).count()
+        self.parked
+            .iter()
+            .filter(|waiting| waiting.load(Relaxed))
+            .count()
     }
 
-    pub fn fold(&mut self) -> Option<bitcode::MemorySemantics> {
-        self.pending.take()
+    pub fn fold(&self) -> Option<bitcode::MemorySemantics> {
+        self.pending.lock().expect("barriers").take()
     }
 
-    pub fn release(&mut self, lane: usize) -> bool {
-        std::mem::replace(&mut self.parked[lane], false)
+    pub fn release(&self, lane: usize) -> bool {
+        self.parked[lane].swap(false, Relaxed)
     }
 
-    pub fn arrived(&mut self, entity: Entity, reached: Barrier) -> Option<Diagnostic> {
-        self.parked[entity.lane] = true;
-        self.pending = Some(reached.semantics);
+    pub fn arrived(&self, entity: Entity, reached: Barrier) {
+        self.parked[entity.lane].store(true, Relaxed);
+        *self.pending.lock().expect("barriers") = Some(reached.semantics);
 
+        if self.checks.divergence {
+            *self.arrivals[entity.lane].lock().expect("barriers") = Some(reached);
+        }
+    }
+
+    pub fn released(&self) -> Vec<(Option<usize>, Diagnostic)> {
         if !self.checks.divergence {
-            return None;
+            return Vec::new();
         }
 
-        let Some(expected) = self.expected else {
-            self.expected = Some(reached);
-            return None;
-        };
+        let arrivals: Vec<(usize, Barrier)> = self
+            .arrivals
+            .iter()
+            .enumerate()
+            .filter_map(|(lane, slot)| Some((lane, slot.lock().expect("barriers").take()?)))
+            .collect();
 
-        if reached == expected {
-            return None;
-        }
-
-        Some(
-            Diagnostic::new(
-                Kind::BarrierDivergence { reached, expected },
-                Severity::Error,
-            )
-            .at(reached.location),
-        )
-    }
-
-    pub fn released(&mut self) -> Option<Diagnostic> {
-        if !self.checks.divergence {
-            return None;
-        }
-
-        let expected = self.expected.take();
+        let expected = arrivals.first().map(|(_, barrier)| *barrier);
         let (arrived, total) = (self.waiting(), self.parked.len());
 
-        if arrived == total {
-            return None;
-        }
-
-        Some(
-            Diagnostic::new(
-                Kind::BarrierParticipation { arrived, total },
-                Severity::Error,
-            )
-            .at(expected.and_then(|barrier| barrier.location)),
-        )
+        arrivals
+            .iter()
+            .filter(|(_, reached)| Some(reached) != expected.as_ref())
+            .map(|(lane, reached)| {
+                (
+                    Some(*lane),
+                    Diagnostic::new(
+                        Kind::BarrierDivergence {
+                            reached: *reached,
+                            expected: expected.expect("an expected barrier"),
+                        },
+                        Severity::Error,
+                    )
+                    .at(reached.location),
+                )
+            })
+            .chain((arrived != total).then(|| {
+                (
+                    None,
+                    Diagnostic::new(
+                        Kind::BarrierParticipation { arrived, total },
+                        Severity::Error,
+                    )
+                    .at(expected.and_then(|barrier| barrier.location)),
+                )
+            }))
+            .collect()
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug)]
 pub struct RaceDetector {
     checks: Checks,
-    lanes: Vec<HashMap<u64, Record>>,
-    group_global: HashMap<u64, Record>,
-    kernel_global: HashMap<u64, Record>,
-    group: [u64; 3],
+    lanes: Vec<Mutex<HashMap<u64, Record>>>,
+    group_global: Mutex<HashMap<u64, Record>>,
+    kernel_global: Mutex<HashMap<u64, Record>>,
+    group: [AtomicU64; 3],
     uniform_writes: bool,
 }
 
@@ -559,25 +597,32 @@ impl RaceDetector {
     pub fn new(checks: Checks, lanes: usize) -> RaceDetector {
         RaceDetector {
             checks,
-            lanes: vec![HashMap::new(); lanes],
-            group_global: HashMap::new(),
-            kernel_global: HashMap::new(),
-            group: [0, 0, 0],
+            lanes: (0..lanes).map(|_| Mutex::new(HashMap::new())).collect(),
+            group_global: Mutex::new(HashMap::new()),
+            kernel_global: Mutex::new(HashMap::new()),
+            group: [const { AtomicU64::new(0) }; 3],
             uniform_writes: checks.uniform_writes,
         }
     }
 
-    pub fn begin_group(&mut self, group: [u64; 3]) {
-        self.group = group;
-
-        for lane in &mut self.lanes {
-            lane.clear();
-        }
-
-        self.group_global.clear();
+    fn group(&self) -> [u64; 3] {
+        core::array::from_fn(|axis| self.group[axis].load(Relaxed))
     }
 
-    pub fn record(&mut self, entity: Entity, access: Access, data: &[u8]) {
+    pub fn begin_group(&self, group: [u64; 3]) {
+        self.group
+            .iter()
+            .zip(group)
+            .for_each(|(axis, value)| axis.store(value, Relaxed));
+
+        for lane in &self.lanes {
+            lane.lock().expect("races").clear();
+        }
+
+        self.group_global.lock().expect("races").clear();
+    }
+
+    pub fn record(&self, entity: Entity, access: Access, data: &[u8]) {
         if !self.checks.races {
             return;
         }
@@ -592,9 +637,10 @@ impl RaceDetector {
             return;
         }
 
-        let Some(map) = self.lanes.get_mut(entity.lane) else {
+        let Some(map) = self.lanes.get(entity.lane) else {
             return;
         };
+        let mut map = map.lock().expect("races");
 
         for index in 0..size {
             let access = RaceAccess {
@@ -611,7 +657,7 @@ impl RaceDetector {
         }
     }
 
-    pub fn barrier(&mut self, semantics: bitcode::MemorySemantics) -> Vec<Diagnostic> {
+    pub fn barrier(&self, semantics: bitcode::MemorySemantics) -> Vec<Diagnostic> {
         if !self.checks.races {
             return Vec::new();
         }
@@ -635,15 +681,18 @@ impl RaceDetector {
         diagnostics
     }
 
-    fn sync(&mut self, space: address::Region) -> Vec<Diagnostic> {
-        let RaceDetector { lanes, group_global, uniform_writes, .. } = self;
-        let uniform_writes = *uniform_writes;
+    fn sync(&self, space: address::Region) -> Vec<Diagnostic> {
+        let uniform_writes = self.uniform_writes;
+        let mut group_global = self.group_global.lock().expect("races");
+
         let global = space == address::Region::Global;
 
         let mut raced = Vec::new();
         let mut merged: HashMap<u64, Record> = HashMap::new();
 
-        for map in lanes.iter_mut() {
+        for map in &self.lanes {
+            let mut map = map.lock().expect("races");
+
             for (address, record) in
                 map.extract_if(|address, _| address::region(*address) == Some(space))
             {
@@ -669,27 +718,30 @@ impl RaceDetector {
             .collect()
     }
 
-    pub fn end_group(&mut self) -> Vec<Diagnostic> {
+    pub fn end_group(&self) -> Vec<Diagnostic> {
         if !self.checks.races {
             return Vec::new();
         }
 
+        let group = self.group();
+
         let mut diagnostics = self.sync(address::Region::Local);
         diagnostics.extend(self.sync(address::Region::Global));
 
-        let merged = std::mem::take(&mut self.group_global);
+        let mut kernel_global = self.kernel_global.lock().expect("races");
+        let merged = std::mem::take(&mut *self.group_global.lock().expect("races"));
         let mut raced = Vec::new();
 
         for (address, record) in merged {
-            let held = self.kernel_global.entry(address).or_default();
+            let entry = kernel_global.entry(address).or_default();
 
-            for (a, b) in pairs(record, *held).into_iter().flatten() {
-                if b.entity.group != self.group && races(a, b, self.uniform_writes) {
+            for (a, b) in pairs(record, *entry).into_iter().flatten() {
+                if b.entity.group != group && races(a, b, self.uniform_writes) {
                     insert_race(&mut raced, address::Region::Global, address, a, b);
                 }
             }
 
-            held.merge(record);
+            entry.merge(record);
         }
 
         diagnostics.extend(
@@ -701,8 +753,8 @@ impl RaceDetector {
         diagnostics
     }
 
-    pub fn end_kernel(&mut self) {
-        self.kernel_global.clear();
+    pub fn end_kernel(&self) {
+        self.kernel_global.lock().expect("races").clear();
     }
 }
 

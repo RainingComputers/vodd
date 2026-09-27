@@ -6,17 +6,24 @@ use crate::detectors;
 use crate::inspect;
 use crate::interpreter;
 use crate::logger;
+
 use crate::logger::Level;
 use crate::parser;
+use rayon::iter::IndexedParallelIterator;
+use rayon::iter::IntoParallelRefMutIterator;
+use rayon::iter::ParallelIterator;
 
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::num::NonZero;
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
+use std::sync::atomic::Ordering::Relaxed;
 use std::thread::JoinHandle;
 
 const BINARY_MAGIC: &[u8] = b"VODD";
@@ -2280,7 +2287,7 @@ pub struct Kernel {
     signature: Vec<ArgumentKind>,
     required_work_group_size: Option<[u32; 3]>,
     local_variables: Arc<Vec<Option<u64>>>,
-    local_storage: address::Storage,
+    local_storage: address::SharedStorage,
     arguments: Vec<Option<KernelArgument>>,
 }
 
@@ -2538,10 +2545,13 @@ struct GroupRunContext<'a> {
     geometry: &'a Grid,
     group: [u64; 3],
     arguments: &'a [interpreter::Argument],
-    global_storage: &'a mut address::UnsafeSharedRawPtrStorage<detectors::Permissions>,
-    local_storage: &'a mut address::Storage,
-    races: &'a mut detectors::RaceDetector,
+    global_storage: &'a address::UnsafeSharedRawPtrStorage<detectors::Permissions>,
+    local_storage: &'a address::SharedStorage,
+    races: &'a detectors::RaceDetector,
     checks: detectors::Checks,
+    handle: &'a debugger::Handle,
+    context: ContextId,
+    module: &'a bitcode::Module,
 }
 
 pub struct Snapshot {
@@ -2553,7 +2563,7 @@ pub struct Snapshot {
     arguments: Vec<KernelArgument>,
     local_arg_addresses: Vec<u64>,
     local_variables: Arc<Vec<Option<u64>>>,
-    local_storage: address::Storage,
+    local_storage: address::SharedStorage,
 }
 
 pub struct Launch {
@@ -2564,7 +2574,7 @@ pub struct Launch {
     arguments: Vec<KernelArgument>,
     local_arg_addresses: Vec<u64>,
     local_variables: Arc<Vec<Option<u64>>>,
-    local_storage: address::Storage,
+    local_storage: address::SharedStorage,
 }
 
 impl Launch {
@@ -2582,21 +2592,25 @@ impl Launch {
     }
 
     fn run(&self, geometry: &Grid) -> Result<()> {
-        let (arguments, mut global_storage) = bind(&self.arguments, &self.local_arg_addresses)?;
+        let (arguments, global_storage) = bind(&self.arguments, &self.local_arg_addresses)?;
         let group_counts = geometry.work_group_count();
-        let mut local_storage = self.local_storage.clone();
+        let local_storage = self.local_storage.clone();
 
         let checks = detectors::Checks::from_env()?;
-        let mut races = detectors::RaceDetector::new(checks, geometry.work_group_size());
+        let races = detectors::RaceDetector::new(checks, geometry.work_group_size());
+        let pool = lanes_pool(geometry.work_group_size())?;
 
         let mut ctx = GroupRunContext {
             geometry,
             group: [0, 0, 0],
             arguments: &arguments,
-            global_storage: &mut global_storage,
-            local_storage: &mut local_storage,
-            races: &mut races,
+            global_storage: &global_storage,
+            local_storage: &local_storage,
+            races: &races,
             checks,
+            handle: &self.handle,
+            context: self.context,
+            module: &self.module,
         };
 
         self.handle.started();
@@ -2605,7 +2619,7 @@ impl Launch {
             ctx.local_storage.zero();
             ctx.group = group;
 
-            if let Err(error) = self.run_group(&mut ctx) {
+            if let Err(error) = self.run_group(&ctx, &pool) {
                 self.handle.aborted();
                 ctx.races.end_kernel();
 
@@ -2621,20 +2635,20 @@ impl Launch {
         Ok(())
     }
 
-    fn run_group(&self, ctx: &mut GroupRunContext<'_>) -> Result<()> {
+    fn run_group(&self, ctx: &GroupRunContext<'_>, pool: &rayon::ThreadPool) -> Result<()> {
         let work_group_size = ctx.geometry.work_group_size();
         let index = index_of(ctx.geometry.work_group_count(), ctx.group);
 
         ctx.races.begin_group(ctx.group);
 
         let mut items = self.lanes(ctx, work_group_size)?;
-        let mut barriers = detectors::BarrierDetector::new(ctx.checks, work_group_size);
+        let barriers = detectors::BarrierDetector::new(ctx.checks, work_group_size);
         let mut progress = vec![inspect::Progress::Fresh; work_group_size];
 
         self.handle.opened(index, &items, &progress)?;
 
         loop {
-            if self.advance(ctx, &mut items, &mut barriers, &mut progress)? {
+            if advance(ctx, pool, &mut items, &barriers, &mut progress)? {
                 self.handle.stepped(index, &items, &progress)?;
             }
 
@@ -2642,13 +2656,13 @@ impl Launch {
                 continue;
             }
 
-            if barriers.waiting() == 0 || !self.release(ctx, &mut barriers, &mut progress) {
+            if barriers.waiting() == 0 || !release(ctx, &barriers, &mut progress) {
                 break;
             }
         }
 
         for diagnostic in ctx.races.end_group() {
-            self.report(ctx.geometry.work_group_count(), diagnostic, None);
+            report(ctx, diagnostic, None);
         }
 
         self.handle.ended(index, &items, &progress)?;
@@ -2676,173 +2690,192 @@ impl Launch {
             })
             .collect()
     }
+}
 
-    fn advance(
-        &self,
-        ctx: &mut GroupRunContext<'_>,
-        items: &mut [interpreter::Interpreter],
-        barriers: &mut detectors::BarrierDetector,
-        progress: &mut [inspect::Progress],
-    ) -> Result<bool> {
-        let mut ran = false;
+fn advance(
+    ctx: &GroupRunContext<'_>,
+    pool: &rayon::ThreadPool,
+    items: &mut [interpreter::Interpreter],
+    barriers: &detectors::BarrierDetector,
+    progress: &mut [inspect::Progress],
+) -> Result<bool> {
+    let ran = progress.iter().any(|lane| lane.is_ready());
 
-        for (lane, item) in items.iter_mut().enumerate() {
-            let Some(reply) = progress[lane].resume() else {
-                continue;
-            };
+    pool.install(|| {
+        items
+            .par_iter_mut()
+            .zip(progress.par_iter_mut())
+            .enumerate()
+            .try_for_each(|(lane, (item, stage))| -> Result<()> {
+                let Some(reply) = stage.resume() else {
+                    return Ok(());
+                };
 
-            ran = true;
-            progress[lane] = self.run_item(ctx, item, barriers, lane, reply)?;
-        }
+                *stage = run_item(ctx, item, barriers, lane, reply)?;
 
-        Ok(ran)
-    }
+                Ok(())
+            })
+    })?;
 
-    fn run_item(
-        &self,
-        ctx: &mut GroupRunContext<'_>,
-        item: &mut interpreter::Interpreter,
-        barriers: &mut detectors::BarrierDetector,
-        lane: usize,
-        mut reply: interpreter::Resume,
-    ) -> Result<inspect::Progress> {
-        let entity = entity_of(ctx.geometry, ctx.group, lane);
+    Ok(ran)
+}
 
-        loop {
-            let yield_ = match item.resume(reply) {
-                Ok(yield_) => yield_,
-                Err(error) => return Err(self.trapped(item.location(), error)),
-            };
+fn lanes_pool(lanes: usize) -> Result<rayon::ThreadPool> {
+    let cores = std::thread::available_parallelism().map_or(1, NonZero::get);
+    let threads = std::env::var("VODD_THREADS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(lanes.min(cores));
 
-            let reason = match yield_ {
-                None => return Ok(inspect::Progress::Done),
-                Some(interpreter::YieldReason::Break) => {
-                    return Ok(inspect::Progress::Ready);
-                }
-                Some(reason) => reason,
-            };
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .thread_name(|at| format!("vodd-lane-{at}"))
+        .build()
+        .map_err(|error| {
+            logger::log(
+                Level::Error,
+                &format!("the lane pool could not be built, {error}"),
+            );
 
-            let at = item.location();
-            let counts = ctx.geometry.work_group_count();
+            Error::OutOfResources
+        })
+}
 
-            let mut report = |diagnostics: detectors::DiagnosticList| {
-                for diagnostic in diagnostics {
-                    let diagnostic = match diagnostic.location {
-                        Some(_) => diagnostic,
-                        None => diagnostic.at(at),
-                    };
+fn run_item(
+    ctx: &GroupRunContext<'_>,
+    item: &mut interpreter::Interpreter,
+    barriers: &detectors::BarrierDetector,
+    lane: usize,
+    mut reply: interpreter::Resume,
+) -> Result<inspect::Progress> {
+    let entity = entity_of(ctx.geometry, ctx.group, lane);
 
-                    self.report(counts, diagnostic.by(entity), Some(item));
-                }
-            };
+    loop {
+        let yield_ = match item.resume(reply) {
+            Ok(yield_) => yield_,
+            Err(error) => return Err(trapped(ctx, item.location(), error)),
+        };
 
-            match service(reason, ctx, entity, at, &mut report) {
-                Ok(Serviced::Parked { execution_scope, semantics }) => {
-                    let reached = detectors::Barrier {
-                        execution_scope,
-                        semantics,
-                        location: item.location(),
-                    };
-
-                    if let Some(diagnostic) = barriers.arrived(entity, reached) {
-                        self.report(counts, diagnostic.by(entity), Some(item));
-                    }
-
-                    return Ok(inspect::Progress::Parked);
-                }
-                Ok(Serviced::Reply(next)) => reply = next,
-                Err(error) => return Err(self.faulted(item.location(), error)),
+        let reason = match yield_ {
+            None => return Ok(inspect::Progress::Done),
+            Some(interpreter::YieldReason::Break) => {
+                return Ok(inspect::Progress::Ready);
             }
-        }
-    }
+            Some(reason) => reason,
+        };
 
-    fn release(
-        &self,
-        ctx: &mut GroupRunContext<'_>,
-        barriers: &mut detectors::BarrierDetector,
-        progress: &mut [inspect::Progress],
-    ) -> bool {
-        let counts = ctx.geometry.work_group_count();
+        let at = item.location();
+        let mut note = |diagnostics: detectors::DiagnosticList| {
+            for diagnostic in diagnostics {
+                let diagnostic = match diagnostic.location {
+                    Some(_) => diagnostic,
+                    None => diagnostic.at(at),
+                };
 
-        if let Some(diagnostic) = barriers.released() {
-            self.report(counts, diagnostic, None);
-        }
-
-        if let Some(semantics) = barriers.fold() {
-            for diagnostic in ctx.races.barrier(semantics) {
-                self.report(counts, diagnostic, None);
+                report(ctx, diagnostic.by(entity), Some(item));
             }
-        }
+        };
 
-        let mut freed = false;
+        match service(reason, ctx, entity, at, &mut note) {
+            Ok(Serviced::Parked { execution_scope, semantics }) => {
+                let reached =
+                    detectors::Barrier { execution_scope, semantics, location: item.location() };
 
-        for (lane, item) in progress.iter_mut().enumerate() {
-            if barriers.release(lane) {
-                *item = inspect::Progress::Ready;
-                freed = true;
+                barriers.arrived(entity, reached);
+
+                return Ok(inspect::Progress::Parked);
             }
+            Ok(Serviced::Reply(next)) => reply = next,
+            Err(error) => return Err(faulted(ctx, item.location(), error)),
         }
+    }
+}
 
-        freed
+fn release(
+    ctx: &GroupRunContext<'_>,
+    barriers: &detectors::BarrierDetector,
+    progress: &mut [inspect::Progress],
+) -> bool {
+    for (lane, diagnostic) in barriers.released() {
+        let diagnostic = match lane {
+            Some(lane) => diagnostic.by(entity_of(ctx.geometry, ctx.group, lane)),
+            None => diagnostic,
+        };
+
+        report(ctx, diagnostic, None);
     }
 
-    fn report(
-        &self,
-        counts: [u64; 3],
-        diagnostic: detectors::Diagnostic,
-        item: Option<&interpreter::Interpreter>,
-    ) {
-        let message = format!("{}: {diagnostic}", self.located(diagnostic.location));
-        let group = index_of(counts, group_of(&diagnostic));
-
-        logger::log(
-            match diagnostic.severity {
-                detectors::Severity::Error => Level::Error,
-                detectors::Severity::Warning => Level::Warn,
-            },
-            &message,
-        );
-        Context::report(self.context, &message);
-
-        self.handle.report(&diagnostic, item, group);
-    }
-
-    fn trapped(&self, location: Option<bitcode::Location>, error: interpreter::Error) -> Error {
-        let origin = self.located(location);
-
-        Context::report(
-            self.context,
-            &format!("{origin}: kernel trapped: {error:?}"),
-        );
-
-        self.handle.trapped(location, &error);
-
-        trap(error)
-    }
-
-    fn faulted(&self, location: Option<bitcode::Location>, error: Error) -> Error {
-        let origin = self.located(location);
-
-        Context::report(
-            self.context,
-            &format!("{origin}: kernel faulted: {error:?}"),
-        );
-
-        self.handle.faulted(location, &error);
-
-        error
-    }
-
-    fn located(&self, location: Option<bitcode::Location>) -> String {
-        match location {
-            Some(location) => format!(
-                "{}:{}:{}",
-                self.module.string(location.file).unwrap_or("<unknown>"),
-                location.line,
-                location.column
-            ),
-            None => "<unknown location>".to_string(),
+    if let Some(semantics) = barriers.fold() {
+        for diagnostic in ctx.races.barrier(semantics) {
+            report(ctx, diagnostic, None);
         }
+    }
+
+    let mut freed = false;
+
+    for (lane, item) in progress.iter_mut().enumerate() {
+        if barriers.release(lane) {
+            *item = inspect::Progress::Ready;
+            freed = true;
+        }
+    }
+
+    freed
+}
+
+fn report(
+    ctx: &GroupRunContext<'_>,
+    diagnostic: detectors::Diagnostic,
+    item: Option<&interpreter::Interpreter>,
+) {
+    let message = format!("{}: {diagnostic}", located(ctx, diagnostic.location));
+    let group = index_of(ctx.geometry.work_group_count(), group_of(&diagnostic));
+
+    logger::log(
+        match diagnostic.severity {
+            detectors::Severity::Error => Level::Error,
+            detectors::Severity::Warning => Level::Warn,
+        },
+        &message,
+    );
+    Context::report(ctx.context, &message);
+
+    ctx.handle.report(&diagnostic, item, group);
+}
+
+fn trapped(
+    ctx: &GroupRunContext<'_>,
+    location: Option<bitcode::Location>,
+    error: interpreter::Error,
+) -> Error {
+    let origin = located(ctx, location);
+
+    Context::report(ctx.context, &format!("{origin}: kernel trapped: {error:?}"));
+
+    ctx.handle.trapped(location, &error);
+
+    trap(error)
+}
+
+fn faulted(ctx: &GroupRunContext<'_>, location: Option<bitcode::Location>, error: Error) -> Error {
+    let origin = located(ctx, location);
+
+    Context::report(ctx.context, &format!("{origin}: kernel faulted: {error:?}"));
+
+    ctx.handle.faulted(location, &error);
+
+    error
+}
+
+fn located(ctx: &GroupRunContext<'_>, location: Option<bitcode::Location>) -> String {
+    match location {
+        Some(location) => format!(
+            "{}:{}:{}",
+            ctx.module.string(location.file).unwrap_or("<unknown>"),
+            location.line,
+            location.column
+        ),
+        None => "<unknown location>".to_string(),
     }
 }
 
@@ -2930,7 +2963,7 @@ fn entity_of(geometry: &Grid, group: [u64; 3], lane: usize) -> detectors::Entity
 
 fn service(
     reason: interpreter::YieldReason,
-    ctx: &mut GroupRunContext<'_>,
+    ctx: &GroupRunContext<'_>,
     entity: detectors::Entity,
     location: Option<bitcode::Location>,
     report: &mut dyn FnMut(detectors::DiagnosticList),
@@ -2978,14 +3011,14 @@ fn service(
         }
         interpreter::YieldReason::ReadLocal { address, size } => {
             let at = detectors::Access::new(address, size, false, false, location);
-            let (read, diagnostics) = detectors::checked_read(
+            let (read, diagnostics) = detectors::checked_shared(
                 local_storage,
                 checks,
                 at,
-                |bytes| -> Result<Vec<u8>> {
+                |slots| -> Result<Vec<u8>> {
                     races.record(entity, at, &[]);
 
-                    Ok(bytes.to_vec())
+                    Ok(load_au8(slots))
                 },
                 || Ok(vec![0u8; size]),
             )?;
@@ -2997,12 +3030,12 @@ fn service(
         interpreter::YieldReason::WriteLocal { address, bytes } => {
             let size = bytes.len();
             let at = detectors::Access::new(address, size, true, false, location);
-            let (_, diagnostics) = detectors::checked_write(
+            let (_, diagnostics) = detectors::checked_shared(
                 local_storage,
                 checks,
                 at,
-                |destination| -> Result<()> {
-                    destination.copy_from_slice(&bytes);
+                |slots| -> Result<()> {
+                    store_au8(slots, &bytes);
                     races.record(entity, at, &bytes);
 
                     Ok(())
@@ -3025,15 +3058,9 @@ fn service(
             let size = width.div_ceil(8) as usize;
             let at = detectors::Access::new(address, size, true, true, location);
 
-            let update = |destination: &mut [u8]| -> Result<u64> {
-                let mut bytes = [0u8; 8];
-                bytes[..size].copy_from_slice(destination);
-
-                let previous = u64::from_le_bytes(bytes);
+            let apply = |previous: u64| -> [u8; 8] {
                 let updated = apply_atomic(operation, previous, value, comparator, width);
                 let written = updated.to_le_bytes();
-
-                destination.copy_from_slice(&written[..size]);
 
                 let (loads, stores) = atomic_effects(operation, previous, comparator);
 
@@ -3046,14 +3073,34 @@ fn service(
                     races.record(entity, at, &written[..size]);
                 }
 
-                Ok(previous)
+                written
             };
 
             let (previous, diagnostics) = match local {
-                true => detectors::checked_write(local_storage, checks, at, update, || Ok(0))?,
-                false => {
-                    detectors::checked_buffer_write(global_storage, checks, at, update, || Ok(0))?
-                }
+                true => detectors::checked_shared(
+                    local_storage,
+                    checks,
+                    at,
+                    |slots| -> Result<u64> {
+                        let previous = load_scalar_au8(slots);
+                        store_au8(slots, &apply(previous)[..size]);
+
+                        Ok(previous)
+                    },
+                    || Ok(0),
+                )?,
+                false => detectors::checked_buffer_write(
+                    global_storage,
+                    checks,
+                    at,
+                    |destination| -> Result<u64> {
+                        let previous = au8_to_u64(destination);
+                        destination.copy_from_slice(&apply(previous)[..size]);
+
+                        Ok(previous)
+                    },
+                    || Ok(0),
+                )?,
             };
 
             report(diagnostics);
@@ -3074,6 +3121,29 @@ fn service(
         interpreter::YieldReason::MemoryBarrier { .. } | interpreter::YieldReason::Break => {
             Serviced::Reply(interpreter::Resume::Ack)
         }
+    })
+}
+
+fn load_au8(slots: &[AtomicU8]) -> Vec<u8> {
+    slots.iter().map(|slot| slot.load(Relaxed)).collect()
+}
+
+fn store_au8(slots: &[AtomicU8], bytes: &[u8]) {
+    slots
+        .iter()
+        .zip(bytes)
+        .for_each(|(slot, byte)| slot.store(*byte, Relaxed));
+}
+
+fn au8_to_u64(bytes: &[u8]) -> u64 {
+    bytes.iter().enumerate().fold(0, |whole, (index, byte)| {
+        whole | (u64::from(*byte) << (index * 8))
+    })
+}
+
+fn load_scalar_au8(slots: &[AtomicU8]) -> u64 {
+    slots.iter().enumerate().fold(0, |whole, (index, slot)| {
+        whole | (u64::from(slot.load(Relaxed)) << (index * 8))
     })
 }
 

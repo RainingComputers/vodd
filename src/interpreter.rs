@@ -243,11 +243,11 @@ fn private_layout(
     Ok((addresses, mutable_storage, constant_storage))
 }
 
-pub type LocalLayout = (Arc<Vec<Option<u64>>>, address::Storage);
+pub type LocalLayout = (Arc<Vec<Option<u64>>>, address::SharedStorage);
 
 pub fn local_layout(module: &bitcode::Module, entry: bitcode::Id) -> Result<LocalLayout, Error> {
     let mut addresses = vec![None; module.bound()];
-    let mut storage = address::Storage::new(address::Region::Local);
+    let mut storage = address::SharedStorage::new(address::Region::Local);
     let named = module.referenced_from(entry);
 
     let stored = module

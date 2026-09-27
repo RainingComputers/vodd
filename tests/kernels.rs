@@ -135,6 +135,7 @@ fn run_case(case: &Case, host: &Path, driver: &str) -> Result<(), String> {
         .args(&case.arguments)
         .env("VODD_CHECK", "all")
         .env("VODD_LOG", &log)
+        .env("VODD_THREADS", "1")
         .envs(runtime_environment(VODD, driver))
         .stdout(std::process::Stdio::from(sink.try_clone().map_err(
             |error| format!("duplicating the log handle: {error}"),

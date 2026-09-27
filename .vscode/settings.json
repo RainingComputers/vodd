@@ -54,6 +54,7 @@
         "progvar",
         "saxpy",
         "SDKROOT",
+        "SERIALISED",
         "signedness",
         "signum",
         "sourcemap",

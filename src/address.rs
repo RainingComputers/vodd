@@ -1,3 +1,11 @@
+use std::sync::Mutex;
+use std::sync::MutexGuard;
+use std::sync::OnceLock;
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::Ordering;
+
+static SERIALISED: OnceLock<Mutex<()>> = OnceLock::new();
+
 const OFFSET_BITS: u32 = 44;
 const SLOT_BITS: u32 = 16;
 const SLOT_SHIFT: u32 = OFFSET_BITS;
@@ -39,6 +47,13 @@ impl Region {
             _ => return None,
         })
     }
+}
+
+fn serialised() -> MutexGuard<'static, ()> {
+    SERIALISED
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("serialised")
 }
 
 pub fn encode(region: Option<Region>, slot: usize, offset: u64) -> u64 {
@@ -193,6 +208,81 @@ impl Storage {
     }
 }
 
+pub struct Slots<'a> {
+    slots: &'a [AtomicU8],
+    _serialised: Option<MutexGuard<'static, ()>>,
+}
+
+impl std::ops::Deref for Slots<'_> {
+    type Target = [AtomicU8];
+
+    fn deref(&self) -> &[AtomicU8] {
+        self.slots
+    }
+}
+
+#[derive(Debug)]
+pub struct SharedStorage {
+    segments: Segments<usize, ()>,
+    bytes: Vec<AtomicU8>,
+}
+
+impl Clone for SharedStorage {
+    fn clone(&self) -> SharedStorage {
+        SharedStorage {
+            segments: self.segments.clone(),
+            bytes: self
+                .bytes
+                .iter()
+                .map(|slot| AtomicU8::new(slot.load(Ordering::Relaxed)))
+                .collect(),
+        }
+    }
+}
+
+impl SharedStorage {
+    pub fn new(region: Region) -> SharedStorage {
+        SharedStorage { segments: Segments::new(region), bytes: Vec::new() }
+    }
+
+    pub fn allocate(&mut self, size: usize, alignment: usize) -> Option<u64> {
+        let ptr = match alignment {
+            0 => self.bytes.len(),
+            alignment => self.bytes.len().next_multiple_of(alignment),
+        };
+
+        let address = self.segments.push(size as u64, ptr, ())?;
+
+        self.bytes.resize_with(ptr + size, || AtomicU8::new(0));
+
+        Some(address)
+    }
+
+    fn span(&self, address: u64, size: usize) -> Result<std::ops::Range<usize>, Invalid> {
+        let ptr = self.segments.get(address, size)?.ptr;
+        let within = ptr + offset(address) as usize;
+
+        Ok(within..within + size)
+    }
+
+    pub fn slice(&self, address: u64, size: usize, serialize: bool) -> Result<Slots<'_>, Invalid> {
+        let serialised = serialize.then(serialised);
+        let slots = &self.bytes[self.span(address, size)?];
+
+        Ok(Slots { slots, _serialised: serialised })
+    }
+
+    pub fn zero(&self) {
+        for slot in &self.bytes {
+            slot.store(0, Ordering::Relaxed);
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UnsafeSharedRawPtrStorage<T> {
     segments: Segments<*mut u8, T>,
@@ -228,11 +318,13 @@ impl<T> UnsafeSharedRawPtrStorage<T> {
     }
 
     pub fn write_with_metadata<R>(
-        &mut self,
+        &self,
         address: u64,
         size: usize,
+        serialize: bool,
         write: impl FnOnce(&T, u64, &mut [u8]) -> R,
     ) -> Result<R, Invalid> {
+        let _serialised = serialize.then(serialised);
         let entry = self.segments.get(address, size)?;
         let within = offset(address);
         let destination =
