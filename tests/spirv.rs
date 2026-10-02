@@ -18,8 +18,15 @@ const FUEL: usize = 1 << 24;
 
 type Buffers = address::Storage;
 
-type Driver<'a> =
-    Box<dyn Fn(&mut interpreter::Interpreter, &mut Buffers, [u64; 3]) -> Result<(), String> + 'a>;
+type Driver<'a> = Box<
+    dyn Fn(
+            &mut interpreter::Interpreter,
+            &bitcode::Module,
+            &mut Buffers,
+            [u64; 3],
+        ) -> Result<(), String>
+        + 'a,
+>;
 
 struct SpirvCase {
     module: String,
@@ -72,9 +79,10 @@ fn spirv_cases() {
             let drive: Driver = if spirv_case.expected_yields.is_empty() {
                 Box::new(driver)
             } else {
-                Box::new(|interpreter, buffers, global_id| {
+                Box::new(|interpreter, module, buffers, global_id| {
                     driver_with_yields_expect(
                         interpreter,
+                        module,
                         buffers,
                         global_id,
                         &spirv_case.expected_yields,
@@ -127,21 +135,27 @@ fn run_spirv_case(spirv_case: &SpirvCase, drive: Driver<'_>) -> Result<Vec<u8>, 
 
     let (mut buffers, arguments) = create_buffer(&spirv_case.arguments);
 
+    let locals = interpreter::local_layout(&module, function)
+        .map_err(|error| format!("local memory: {error:?}"))?
+        .0;
+    let fixed = std::sync::Arc::new(
+        interpreter::fixed(&module, &locals).map_err(|error| format!("constants: {error:?}"))?,
+    );
+
     for id in 0..spirv_case.global_work_size {
         let mut interpreter = interpreter::Interpreter::new(
             std::sync::Arc::clone(&module),
             function,
             &arguments,
-            interpreter::local_layout(&module, function)
-                .map_err(|error| format!("local memory: {error:?}"))?
-                .0,
+            std::sync::Arc::clone(&locals),
+            &fixed,
             FUEL,
             false,
             detectors::Checks::from_env().expect("VODD_CHECK"),
         )
         .map_err(|error| format!("invocation: {error:?}"))?;
 
-        drive(&mut interpreter, &mut buffers, [id as u64, 0, 0])
+        drive(&mut interpreter, &module, &mut buffers, [id as u64, 0, 0])
             .map_err(|error| format!("work item {id}: {error}"))?;
     }
 
@@ -157,6 +171,7 @@ fn run_spirv_case(spirv_case: &SpirvCase, drive: Driver<'_>) -> Result<Vec<u8>, 
 
 fn driver_with_yields_expect(
     interpreter: &mut interpreter::Interpreter,
+    module: &bitcode::Module,
     buffers: &mut Buffers,
     global_id: [u64; 3],
     expected: &[interpreter::YieldReason],
@@ -167,7 +182,7 @@ fn driver_with_yields_expect(
     let mut yields = Vec::new();
 
     while let Some(reason) = interpreter
-        .resume(reply)
+        .resume(module, reply)
         .map_err(|error| format!("resume: {error:?}"))?
     {
         if watched.contains(&std::mem::discriminant(&reason)) {
@@ -188,13 +203,14 @@ fn driver_with_yields_expect(
 
 fn driver(
     interpreter: &mut interpreter::Interpreter,
+    module: &bitcode::Module,
     buffers: &mut Buffers,
     global_id: [u64; 3],
 ) -> Result<(), String> {
     let mut reply = interpreter::Resume::Start;
 
     while let Some(reason) = interpreter
-        .resume(reply)
+        .resume(module, reply)
         .map_err(|error| format!("resume: {error:?}"))?
     {
         reply = driver_inner(reason, buffers, global_id)?;
@@ -211,7 +227,7 @@ fn driver_inner(
     Ok(match reason {
         interpreter::YieldReason::Read { address, size }
         | interpreter::YieldReason::ReadLocal { address, size } => {
-            interpreter::Resume::Bytes(read(buffers, address, size)?)
+            interpreter::Resume::Bytes(interpreter::Bytes::new(&read(buffers, address, size)?))
         }
         interpreter::YieldReason::Write { address, bytes }
         | interpreter::YieldReason::WriteLocal { address, bytes } => {

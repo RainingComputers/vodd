@@ -58,6 +58,7 @@ impl Handle {
             source.as_deref().map(String::as_str),
             local,
             counts,
+            held(),
         ));
 
         let link = post.post(Change::Open(id, tab)).then(|| Link { id, post });
@@ -298,6 +299,16 @@ fn address() -> Option<String> {
     std::env::var("VODD_DEBUG").ok().filter(|at| !at.is_empty())
 }
 
+// Whether a launch is held at its opening line. On by default, because a
+// debugger that lets the program run away before you have opened it is not
+// much use; VODD_BREAK=none lets a launch start running instead.
+fn held() -> bool {
+    !matches!(
+        std::env::var("VODD_BREAK").ok().as_deref(),
+        Some("none" | "no" | "off" | "0")
+    )
+}
+
 fn after(state: State) -> (State, bool) {
     let mut state = state;
 
@@ -347,6 +358,7 @@ fn press(request: &hypermedia::Request) -> (Vec<Change>, hypermedia::Reply) {
     let control = match request.field("do") {
         Some("resume") => Control::Resume,
         Some("step") => Control::Step,
+        Some("stop") => Control::Stop,
         _ => return (Vec::new(), refused("a control")),
     };
 

@@ -142,7 +142,10 @@ body {
 .dot.finished {
     background: var(--faint);
 }
+/* The same breath as a running cell in the lattice, so a tab that is working
+   reads the same as the work itself. */
 .dot.running {
+    animation: lattice-breathe 1300ms ease-in-out infinite;
     background: var(--green);
 }
 .dot.paused {
@@ -583,6 +586,9 @@ body {
     .lattice .cell.running::after {
         animation: none;
         opacity: 0.75;
+    }
+    .dot.running {
+        animation: none;
     }
 }
 

@@ -48,6 +48,7 @@ pub struct GroupCells {
 pub enum Control {
     Resume,
     Step,
+    Stop,
 }
 
 impl Control {
@@ -55,6 +56,7 @@ impl Control {
         match self {
             Control::Resume => "Continue",
             Control::Step => "Step into",
+            Control::Stop => "Stop",
         }
     }
 }
@@ -223,6 +225,8 @@ pub struct State {
     trails: Vec<Vec<Vec<usize>>>,
     fault: Vec<Option<u32>>,
     stepping: BTreeMap<u32, bool>,
+    pausing: BTreeMap<u32, bool>,
+    breaks_at_start: BTreeMap<u32, bool>,
     marks: Vec<BTreeMap<u64, BTreeSet<usize>>>,
     suppressed: Vec<bool>,
     breaks: Vec<BTreeSet<u32>>,
@@ -277,6 +281,14 @@ impl State {
         self.stepping.get(&id).copied().unwrap_or(false)
     }
 
+    fn pausing(&self, id: u32) -> bool {
+        self.pausing.get(&id).copied().unwrap_or(false)
+    }
+
+    fn halts(&self, id: u32) -> bool {
+        self.breaks_at_start.get(&id).copied().unwrap_or(true)
+    }
+
     fn suppressed(&self, at: usize) -> bool {
         self.suppressed[at]
     }
@@ -311,12 +323,17 @@ impl State {
         self.breaks.push(BTreeSet::new());
         self.fault.push(None);
         self.stepping.insert(id, false);
+        self.pausing.insert(id, false);
+        self.breaks_at_start
+            .insert(id, self.model.tabs[at].status == Status::Paused);
 
         self
     }
 
     fn forgot(mut self, id: u32) -> State {
         self.stepping.remove(&id);
+        self.pausing.remove(&id);
+        self.breaks_at_start.remove(&id);
         self.tab_of.remove(&id);
 
         self
@@ -464,6 +481,12 @@ impl State {
         self
     }
 
+    fn pauses(mut self, id: u32, pausing: bool) -> State {
+        self.pausing.insert(id, pausing);
+
+        self
+    }
+
     fn parked(mut self, id: u32, reply: SyncSender<Next>) -> State {
         self.parked.entry(id).or_default().push(reply);
 
@@ -541,7 +564,13 @@ pub fn state(state: State, change: Change) -> State {
     }
 }
 
-pub fn opening(name: &str, source: Option<&str>, local: [u64; 3], counts: [u64; 3]) -> Pane {
+pub fn opening(
+    name: &str,
+    source: Option<&str>,
+    local: [u64; 3],
+    counts: [u64; 3],
+    held: bool,
+) -> Pane {
     let lines: Vec<SourceLine> = source
         .unwrap_or_default()
         .lines()
@@ -566,10 +595,15 @@ pub fn opening(name: &str, source: Option<&str>, local: [u64; 3], counts: [u64; 
         text: Some(lines[0].text.clone()),
     };
 
+    let status = match held {
+        true => Status::Paused,
+        false => Status::Running,
+    };
+
     Pane {
         name: name.to_string(),
-        status: Status::Ready,
-        commands: commands(Status::Ready, false),
+        status,
+        commands: commands(status, false),
         local,
         counts,
         dispatched: 0,
@@ -593,13 +627,7 @@ pub fn opening(name: &str, source: Option<&str>, local: [u64; 3], counts: [u64; 
 }
 
 fn open(state: State, id: u32, tab: Box<Pane>) -> State {
-    let tab = Pane {
-        status: Status::Paused,
-        commands: commands(Status::Paused, false),
-        ..*tab
-    };
-
-    state.opened(id, Box::new(tab))
+    state.opened(id, tab)
 }
 
 fn linger(state: State, reply: SyncSender<()>) -> State {
@@ -653,6 +681,7 @@ fn press(state: State, at: usize, control: Control) -> State {
         Some(id) if state.tab(at).status == Status::Finished => {
             state.releasing(true).lingered().released(id, Next::Carry)
         }
+        Some(id) if control == Control::Stop => settle(state.pauses(id, true), at),
         Some(id) => {
             let state = state
                 .steps(id, control == Control::Step)
@@ -802,18 +831,29 @@ fn hold(state: State, id: u32, struck: bool, detailed: bool, reply: SyncSender<N
         return running(state, at).send(Sent::Flow(reply, Next::Carry));
     }
 
-    let arriving = !finished && (struck || state.stepping(id));
+    let arriving = !finished && (struck || state.stepping(id) || state.pausing(id));
 
     if arriving && !detailed {
         return state.send(Sent::Flow(reply, Next::Locals));
     }
 
     let state = match arriving {
-        true => settle(state.steps(id, false).status(at, Status::Paused), at),
+        true => settle(
+            state
+                .steps(id, false)
+                .pauses(id, false)
+                .status(at, Status::Paused),
+            at,
+        ),
         false => state,
     };
 
-    let holding = matches!(state.tab(at).status, Status::Paused | Status::Finished);
+    // A launch that was never held at its first line is not held at its last
+    // either, or a program with more than one launch could not run freely.
+    let holding = match state.halts(id) {
+        true => matches!(state.tab(at).status, Status::Paused | Status::Finished),
+        false => state.tab(at).status == Status::Paused,
+    };
 
     match (holding, detailed) {
         (false, _) => state.send(Sent::Flow(reply, Next::Carry)),
@@ -868,6 +908,7 @@ fn commands(status: Status, watching: bool) -> Vec<ControlKey> {
             enabled: (stopped && watching) || ended,
         },
         ControlKey { control: Control::Step, enabled: stopped && watching },
+        ControlKey { control: Control::Stop, enabled: status == Status::Running },
     ]
 }
 

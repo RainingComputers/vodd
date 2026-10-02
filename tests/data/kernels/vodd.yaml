@@ -353,3 +353,37 @@ cases:
       out[i] = *p;
       }
 
+  - name: mixed_width_overlap_race
+    entry: entry
+    global_size: [2, 1, 1]
+    local_size: [2, 1, 1]
+    arguments:
+      - { buffer: 16 }
+    expected:
+      data_race: 1
+    source: |
+      kernel void entry(global int *data)
+      {
+      int i = get_global_id(0);
+      global char *bytes = (global char *)data;
+      if (i == 0) { data[0] = 0x01020304; }
+      else { bytes[2] = 0x77; }
+      }
+
+  - name: unaligned_overlap_race
+    entry: entry
+    global_size: [2, 1, 1]
+    local_size: [2, 1, 1]
+    arguments:
+      - { buffer: 32 }
+    expected:
+      data_race: 1
+      misaligned: 1
+    source: |
+      kernel void entry(global int *data)
+      {
+      int i = get_global_id(0);
+      global char *bytes = (global char *)data;
+      if (i == 0) { *(global int *)(bytes + 6) = 0x01020304; }
+      else { bytes[9] = 0x77; }
+      }

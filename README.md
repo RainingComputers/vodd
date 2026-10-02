@@ -101,6 +101,8 @@ VODD_CHECK=all LD_PRELOAD=./target/release/libvodd.so ./my-program
 | `VODD_MAX_ERRORS` | stop reporting after this many diagnostics, default 1000                            |
 | `VODD_THREADS`    | work items to run at once, default the smaller of the work group and the core count |
 | `VODD_DEBUG`      | address to serve the debugger on, for example `127.0.0.1:8080`                      |
+| `VODD_MEM`        | global memory to report, bytes or with a K, M or G suffix, default 64M              |
+| `VODD_BREAK`      | `none` to let a launch start running instead of holding at its first line           |
 | `VODD_CLANG`      | path to clang                                                                       |
 | `VODD_LLVM_SPIRV` | path to llvm-spirv                                                                  |
 | `VODD_SPIRV_LINK` | path to spirv-link                                                                  |
@@ -114,7 +116,9 @@ program waits at the first line of the kernel until you continue it.
 VODD_DEBUG=127.0.0.1:8080 LD_PRELOAD=./target/release/libvodd.so ./my-program
 ```
 
-Open `http://127.0.0.1:8080` in a browser.
+Open `http://127.0.0.1:8080` in a browser. Continue and step move a work group
+along, and stop holds it again wherever it has got to. Set `VODD_BREAK=none` if
+you would rather a launch started running and stopped it yourself.
 
 ## Running tests
 

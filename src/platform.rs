@@ -19,6 +19,7 @@ use std::num::NonZero;
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU32;
@@ -32,7 +33,6 @@ const MAX_WORK_GROUP_SIZE: usize = 256;
 const MAX_WORK_ITEM_SIZE: u64 = 256;
 const LOCAL_MEM_SIZE: u64 = 32 * 1024;
 const GLOBAL_MEM_SIZE: u64 = 64 * 1024 * 1024;
-const MAX_MEM_ALLOC_SIZE: u64 = GLOBAL_MEM_SIZE / 4;
 const MEM_BASE_ADDR_ALIGN_BITS: u32 = 1024;
 const FUEL: usize = 1 << 28;
 
@@ -48,6 +48,45 @@ static PROGRESS: Mutex<u64> = Mutex::new(0);
 static PROGRESSED: Condvar = Condvar::new();
 static WORKER: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+// Nothing here holds the memory, so the number only decides what a program is
+// allowed to ask for. It is not raised by default because the conformance
+// buffers suite sizes its allocations from what the device reports, and a
+// larger number there buys nothing and costs a great deal of test time. A
+// program that wants bigger buffers, such as llama.cpp dequantising a weight
+// matrix, says so with VODD_MEM.
+fn global_mem_size() -> u64 {
+    static SIZE: OnceLock<u64> = OnceLock::new();
+
+    *SIZE.get_or_init(|| {
+        std::env::var("VODD_MEM")
+            .ok()
+            .and_then(|value| memory_size(&value))
+            .unwrap_or(GLOBAL_MEM_SIZE)
+    })
+}
+
+fn max_mem_alloc_size() -> u64 {
+    global_mem_size() / 4
+}
+
+// Bytes, or a count with a K, M or G suffix.
+fn memory_size(value: &str) -> Option<u64> {
+    let value = value.trim();
+
+    let (count, scale) = match value.chars().last()? {
+        'K' | 'k' => (&value[..value.len() - 1], 1024),
+        'M' | 'm' => (&value[..value.len() - 1], 1024 * 1024),
+        'G' | 'g' => (&value[..value.len() - 1], 1024 * 1024 * 1024),
+        _ => (value, 1),
+    };
+
+    count
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .and_then(|count| count.checked_mul(scale))
+}
 
 fn align_up(size: usize) -> usize {
     size.next_multiple_of(Device::MEM_BASE_ADDR_ALIGN)
@@ -717,7 +756,7 @@ impl Device {
             DeviceInfo::AddressBits => InfoValue::Uint(64),
             DeviceInfo::MaxReadImageArgs => InfoValue::Uint(0),
             DeviceInfo::MaxWriteImageArgs => InfoValue::Uint(0),
-            DeviceInfo::MaxMemAllocSize => InfoValue::Ulong(MAX_MEM_ALLOC_SIZE),
+            DeviceInfo::MaxMemAllocSize => InfoValue::Ulong(max_mem_alloc_size()),
             DeviceInfo::Image2dMaxWidth => InfoValue::Size(0),
             DeviceInfo::Image2dMaxHeight => InfoValue::Size(0),
             DeviceInfo::Image3dMaxWidth => InfoValue::Size(0),
@@ -739,7 +778,7 @@ impl Device {
             DeviceInfo::GlobalMemCacheType => InfoValue::MemCacheType(MemCacheType::ReadWrite),
             DeviceInfo::GlobalMemCachelineSize => InfoValue::Uint(64),
             DeviceInfo::GlobalMemCacheSize => InfoValue::Ulong(32 * 1024),
-            DeviceInfo::GlobalMemSize => InfoValue::Ulong(GLOBAL_MEM_SIZE),
+            DeviceInfo::GlobalMemSize => InfoValue::Ulong(global_mem_size()),
             DeviceInfo::MaxConstantBufferSize => InfoValue::Ulong(64 * 1024),
             DeviceInfo::MaxConstantArgs => InfoValue::Uint(8),
             DeviceInfo::LocalMemType => InfoValue::LocalMemType(LocalMemType::Local),
@@ -2552,6 +2591,7 @@ struct GroupRunContext<'a> {
     handle: &'a debugger::Handle,
     context: ContextId,
     module: &'a bitcode::Module,
+    fixed: &'a Arc<interpreter::Fixed>,
 }
 
 pub struct Snapshot {
@@ -2596,6 +2636,9 @@ impl Launch {
         let group_counts = geometry.work_group_count();
         let local_storage = self.local_storage.clone();
 
+        let fixed =
+            Arc::new(interpreter::fixed(&self.module, &self.local_variables).map_err(trap)?);
+
         let checks = detectors::Checks::from_env()?;
         let races = detectors::RaceDetector::new(checks, geometry.work_group_size());
         let pool = lanes_pool(geometry.work_group_size())?;
@@ -2611,6 +2654,7 @@ impl Launch {
             handle: &self.handle,
             context: self.context,
             module: &self.module,
+            fixed: &fixed,
         };
 
         self.handle.started();
@@ -2656,12 +2700,14 @@ impl Launch {
                 continue;
             }
 
-            if barriers.waiting() == 0 || !release(ctx, &barriers, &mut progress) {
+            if barriers.waiting() == 0 || !pool.install(|| release(ctx, &barriers, &mut progress)) {
                 break;
             }
         }
 
-        for diagnostic in ctx.races.end_group() {
+        // Folding the per lane race maps is parallel work, so it runs in the
+        // lane pool and honours VODD_THREADS rather than rayon's global pool.
+        for diagnostic in pool.install(|| ctx.races.end_group()) {
             report(ctx, diagnostic, None);
         }
 
@@ -2682,6 +2728,7 @@ impl Launch {
                     self.function,
                     ctx.arguments,
                     Arc::clone(&self.local_variables),
+                    ctx.fixed,
                     FUEL,
                     self.handle.attached(),
                     ctx.checks,
@@ -2751,7 +2798,7 @@ fn run_item(
     let entity = entity_of(ctx.geometry, ctx.group, lane);
 
     loop {
-        let yield_ = match item.resume(reply) {
+        let yield_ = match item.resume(ctx.module, reply) {
             Ok(yield_) => yield_,
             Err(error) => return Err(trapped(ctx, item.location(), error)),
         };
@@ -2978,11 +3025,11 @@ fn service(
                 global_storage,
                 checks,
                 at,
-                |bytes| -> Result<Vec<u8>> {
+                |bytes| -> Result<interpreter::Bytes> {
                     races.record(entity, at, &[]);
-                    Ok(bytes.to_vec())
+                    Ok(interpreter::Bytes::new(bytes))
                 },
-                || Ok(vec![0u8; size]),
+                || Ok(interpreter::Bytes::zeroed(size)),
             )?;
 
             report(diagnostics);
@@ -3015,12 +3062,12 @@ fn service(
                 local_storage,
                 checks,
                 at,
-                |slots| -> Result<Vec<u8>> {
+                |slots| -> Result<interpreter::Bytes> {
                     races.record(entity, at, &[]);
 
-                    Ok(load_au8(slots))
+                    Ok(interpreter::Bytes::new(&load_au8(slots)))
                 },
-                || Ok(vec![0u8; size]),
+                || Ok(interpreter::Bytes::zeroed(size)),
             )?;
 
             report(diagnostics);
@@ -3263,7 +3310,7 @@ impl Buffer {
     pub fn create(context: ContextId, flags: MemFlags, size: usize) -> Result<BufferId> {
         Context::exists(context)?;
 
-        if size == 0 || size as u64 > MAX_MEM_ALLOC_SIZE {
+        if size == 0 || size as u64 > max_mem_alloc_size() {
             return Err(Error::InvalidBufferSize);
         }
 

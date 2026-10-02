@@ -25,6 +25,7 @@ pub const STYLE: &str = concat!(
 );
 const RESUME: &str = include_str!("templates/icons/resume.svg");
 const STEP: &str = include_str!("templates/icons/step.svg");
+const STOP: &str = include_str!("templates/icons/stop.svg");
 const UNPLUGGED: &str = include_str!("templates/icons/unplugged.svg");
 const SCRIPT: &str = include_str!("templates/debugger.js");
 
@@ -1241,6 +1242,7 @@ fn control_name(control: state::Control) -> &'static str {
     match control {
         state::Control::Resume => "resume",
         state::Control::Step => "step",
+        state::Control::Stop => "stop",
     }
 }
 
@@ -1248,6 +1250,7 @@ fn control_icon(control: state::Control) -> &'static str {
     match control {
         state::Control::Resume => RESUME,
         state::Control::Step => STEP,
+        state::Control::Stop => STOP,
     }
 }
 

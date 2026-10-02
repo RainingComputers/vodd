@@ -5,7 +5,13 @@ use crate::value;
 
 use std::sync::Arc;
 
-pub use crate::bitcode::AtomicOp as Atomic;
+// Extended instruction operands are gathered on the stack up to this many, so
+// a sqrt in a loop does not allocate per call. Worth 5%.
+const INLINE_OPERANDS: usize = 4;
+
+// Loads and stores up to this size ride inline instead of allocating a vector
+// for the trip between the interpreter and whoever owns the memory. Worth 2%.
+const INLINE_BYTES: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -51,6 +57,49 @@ pub enum Argument {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bytes {
+    Inline {
+        data: [u8; INLINE_BYTES],
+        len: usize,
+    },
+    Heap(Vec<u8>),
+}
+
+impl Bytes {
+    pub fn new(source: &[u8]) -> Bytes {
+        if source.len() > INLINE_BYTES {
+            return Bytes::Heap(source.to_vec());
+        }
+
+        let mut data = [0u8; INLINE_BYTES];
+
+        data[..source.len()].copy_from_slice(source);
+
+        Bytes::Inline { data, len: source.len() }
+    }
+
+    pub fn zeroed(len: usize) -> Bytes {
+        match len > INLINE_BYTES {
+            true => Bytes::Heap(vec![0u8; len]),
+            false => Bytes::Inline { data: [0u8; INLINE_BYTES], len },
+        }
+    }
+}
+
+impl std::ops::Deref for Bytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Bytes::Inline { data, len } => &data[..*len],
+            Bytes::Heap(held) => held,
+        }
+    }
+}
+
+pub use crate::bitcode::AtomicOp as Atomic;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum YieldReason {
     Read {
         address: u64,
@@ -62,11 +111,11 @@ pub enum YieldReason {
     },
     Write {
         address: u64,
-        bytes: Vec<u8>,
+        bytes: Bytes,
     },
     WriteLocal {
         address: u64,
-        bytes: Vec<u8>,
+        bytes: Bytes,
     },
     Atomic {
         operation: Atomic,
@@ -112,7 +161,7 @@ impl YieldReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resume {
     Start,
-    Bytes(Vec<u8>),
+    Bytes(Bytes),
     Scalar(u64),
     Builtin([u64; 3]),
     Ack,
@@ -169,9 +218,15 @@ pub struct Interpreter {
     module: Arc<bitcode::Module>,
     mutable_storage: address::Storage,
     constant_storage: address::Storage,
-    private_addresses: Vec<Option<u64>>,
     local_addresses: Arc<Vec<Option<u64>>>,
-    frames: Vec<Frame>,
+    // Shared across every lane. Held per lane it was 256 copies of one table
+    // competing for the same cache, and sharing it was 15% at twelve threads.
+    fixed: Arc<Fixed>,
+    // The running frame is held out of the stack, so stepping the instruction
+    // pointer after every instruction is a field write rather than an index
+    // into a vector on the heap. Worth 4%.
+    current: Option<Frame>,
+    suspended: Vec<Frame>,
     storage: address::Storage,
     fuel: usize,
     debug: bool,
@@ -303,24 +358,83 @@ fn insert(
     }
 }
 
+// What a module settles before it runs, worked out once per launch.
+#[derive(Debug)]
+pub struct Fixed {
+    pub resolved: Vec<Option<value::Value>>,
+    pub private_addresses: Vec<Option<u64>>,
+}
+
+pub fn fixed(module: &bitcode::Module, local_addresses: &[Option<u64>]) -> Result<Fixed, Error> {
+    let (private_addresses, ..) = private_layout(module)?;
+
+    let resolved = (0..module.bound() as bitcode::Id)
+        .map(|id| resolve(module, &private_addresses, local_addresses, id).ok())
+        .collect();
+
+    Ok(Fixed { resolved, private_addresses })
+}
+
+fn resolve(
+    module: &bitcode::Module,
+    private_addresses: &[Option<u64>],
+    local_addresses: &[Option<u64>],
+    id: bitcode::Id,
+) -> Result<value::Value, Error> {
+    match value::constant(module, id) {
+        Ok(value) => return Ok(value),
+        Err(value::Error::Bitcode(bitcode::Error::NotAConstant(_))) => (),
+        Err(error) => return Err(error.into()),
+    }
+
+    if let Some(variable) = module.variable(id)? {
+        let pointee_type = module.pointee_type(variable.result_type)?;
+
+        if let Some(builtin) = module.decorations(id)?.builtin {
+            return Ok(value::Value::Pointer(value::Pointer {
+                address: builtin_to_addr(builtin),
+                pointee_type,
+            }));
+        }
+
+        let address = match variable.storage {
+            bitcode::StorageClass::UniformConstant | bitcode::StorageClass::Private => {
+                address_of(private_addresses, id)?
+            }
+            bitcode::StorageClass::Workgroup => address_of(local_addresses, id)?,
+            storage => return Err(value::Error::UnsupportedStorageClass(storage).into()),
+        };
+
+        return Ok(value::Value::Pointer(value::Pointer {
+            address,
+            pointee_type,
+        }));
+    }
+
+    Err(Error::UnboundValue(id))
+}
+
 impl Interpreter {
     pub fn new(
         module: Arc<bitcode::Module>,
         function: bitcode::Id,
         arguments: &[Argument],
         local_addresses: Arc<Vec<Option<u64>>>,
+        fixed: &Arc<Fixed>,
         fuel: usize,
         debug: bool,
         checks: detectors::Checks,
     ) -> Result<Interpreter, Error> {
-        let (private_addresses, mutable_storage, constant_storage) = private_layout(&module)?;
+        let (_addresses, mutable_storage, constant_storage) = private_layout(&module)?;
 
         let entry = module.function(function)?;
         if entry.parameters.len() != arguments.len() {
             return Err(Error::ArgumentMismatch);
         }
 
-        let mut values = vec![None; module.bound()];
+        // Seeded with the fixed values, so reading an operand is one indexed
+        // lookup with no second table behind it.
+        let mut values = fixed.resolved.clone();
         let mut storage = address::Storage::new(address::Region::Invocation);
 
         for (parameter, argument) in entry.parameters.iter().zip(arguments) {
@@ -356,9 +470,10 @@ impl Interpreter {
             module,
             mutable_storage,
             constant_storage,
-            private_addresses,
             local_addresses,
-            frames: vec![frame],
+            fixed: Arc::clone(fixed),
+            current: Some(frame),
+            suspended: Vec::new(),
             storage,
             fuel,
             debug,
@@ -440,10 +555,10 @@ impl Interpreter {
     }
 
     pub fn stack(&self) -> Vec<Called> {
-        let wrapper = usize::from(self.frames.len() > 1);
+        let held: Vec<&Frame> = self.suspended.iter().chain(self.current.as_ref()).collect();
+        let wrapper = usize::from(held.len() > 1);
 
-        self.frames
-            .iter()
+        held.into_iter()
             .skip(wrapper)
             .rev()
             .map(|frame| {
@@ -461,7 +576,16 @@ impl Interpreter {
             .collect()
     }
 
-    pub fn resume(&mut self, resume: Resume) -> Result<Option<YieldReason>, Error> {
+    pub fn resume(
+        &mut self,
+        module: &bitcode::Module,
+        resume: Resume,
+    ) -> Result<Option<YieldReason>, Error> {
+        debug_assert!(
+            std::ptr::eq(module, &*self.module),
+            "resumed against a different module than the interpreter was built with"
+        );
+
         let mut resume = match (self.pending.take(), resume) {
             (None, Resume::Start) => None,
             (Some(YieldReason::Break), Resume::Ack) => {
@@ -473,17 +597,55 @@ impl Interpreter {
             _ => return Err(Error::UnexpectedResume),
         };
 
-        while !self.frames.is_empty() {
+        // Looked up once a step and kept across steps. Both halves of a step
+        // used to work it out for themselves, which was a sixth of a run. The
+        // function is held apart from the block because unoptimised code is
+        // full of short blocks, so the block changes often and the function
+        // almost never does.
+        let mut held_function: Option<(bitcode::Id, &bitcode::Function)> = None;
+        let mut held_block: Option<(bitcode::Id, bitcode::Id, &bitcode::Block)> = None;
+
+        while self.current.is_some() {
             if self.fuel == 0 {
                 return Err(Error::OutOfFuel);
             }
             self.fuel -= 1;
 
-            if let Some(reason) = self.resume_debug(resume.as_ref())? {
+            let frame = self.frame()?;
+            let (in_function, in_block, position) =
+                (frame.function, frame.block, frame.instruction);
+
+            let function = match held_function {
+                Some((was, function)) if was == in_function => function,
+                _ => {
+                    let function = module.function(in_function)?;
+
+                    held_function = Some((in_function, function));
+
+                    function
+                }
+            };
+
+            let block = match held_block {
+                Some((was_function, was_block, block))
+                    if was_function == in_function && was_block == in_block =>
+                {
+                    block
+                }
+                _ => {
+                    let block = function.block(in_block)?;
+
+                    held_block = Some((in_function, in_block, block));
+
+                    block
+                }
+            };
+
+            if let Some(reason) = self.resume_debug(function, block, position, resume.as_ref())? {
                 return Ok(Some(reason));
             }
 
-            if let Some(reason) = self.resume_inner(resume.take())? {
+            if let Some(reason) = self.resume_inner(block, position, resume.take())? {
                 return Ok(Some(reason));
             }
         }
@@ -491,23 +653,27 @@ impl Interpreter {
         Ok(None)
     }
 
-    fn resume_debug(&mut self, resume: Option<&Resume>) -> Result<Option<YieldReason>, Error> {
-        let frame = self.frame()?;
-        let function = self.module.function(frame.function)?;
-        let block = function.block(frame.block)?;
-        let line = block.line(frame.instruction);
-        let prologue = line.is_some_and(|location| function.prologue.contains(&location.line));
+    fn resume_debug(
+        &mut self,
+        function: &bitcode::Function,
+        block: &bitcode::Block,
+        position: usize,
+        resume: Option<&Resume>,
+    ) -> Result<Option<YieldReason>, Error> {
+        let line = block.line(position);
 
         self.location = line;
 
         let arrived = line.map(|location| (location.file, location.line));
 
+        // Asking whether this line is in the prologue scans a list, and the
+        // answer is only used with a debugger attached. Worth 9%.
         if self.debug
             && !self.stepped
-            && !prologue
             && resume.is_none()
             && arrived.is_some()
             && arrived != self.broke_at
+            && !line.is_some_and(|location| function.prologue.contains(&location.line))
         {
             self.broke_at = arrived;
             return self.yield_(YieldReason::Break);
@@ -518,18 +684,18 @@ impl Interpreter {
         Ok(None)
     }
 
-    fn resume_inner(&mut self, mut resume: Option<Resume>) -> Result<Option<YieldReason>, Error> {
-        let frame = self.frame()?;
-        let function = self.module.function(frame.function)?;
-        let block = function.block(frame.block)?;
-        let position = frame.instruction;
-        let instruction = block
-            .instructions
-            .get(position)
-            .cloned()
-            .ok_or(Error::EndOfBlock)?;
+    // The block comes from the caller's module handle rather than off self, so
+    // the instruction can be read in place while the arms still mutate self. It
+    // used to be cloned for that, which allocated on every step. Worth 5%.
+    fn resume_inner(
+        &mut self,
+        block: &bitcode::Block,
+        position: usize,
+        mut resume: Option<Resume>,
+    ) -> Result<Option<YieldReason>, Error> {
+        let instruction = block.instructions.get(position).ok_or(Error::EndOfBlock)?;
 
-        match &instruction {
+        match instruction {
             bitcode::Instruction::Nop => self.advance()?,
 
             bitcode::Instruction::Undef { result, result_type } => {
@@ -566,7 +732,7 @@ impl Interpreter {
             }
 
             bitcode::Instruction::Load { result, pointer, alignment, .. } => {
-                let target = self.value(*pointer)?.as_pointer()?;
+                let target = self.operand(*pointer)?.as_pointer()?;
                 let size = self.module.layout(target.pointee_type)?.size;
 
                 match resume.take() {
@@ -621,7 +787,7 @@ impl Interpreter {
             }
 
             bitcode::Instruction::Store { pointer, object, alignment } => {
-                let target = self.value(*pointer)?.as_pointer()?;
+                let target = self.operand(*pointer)?.as_pointer()?;
                 let size = self.module.layout(target.pointee_type)?.size;
 
                 match resume.take() {
@@ -642,15 +808,20 @@ impl Interpreter {
                                 return Err(Error::ReadOnlyRegion);
                             }
                             Some(address::Region::Global) | Some(address::Region::Local) | None => {
-                                let mut bytes = vec![0u8; size];
+                                let mut inline = [0u8; INLINE_BYTES];
+                                let mut spill;
 
-                                value::encode(
-                                    &self.module,
-                                    target.pointee_type,
-                                    &value,
-                                    &mut bytes,
-                                )?;
+                                let scratch: &mut [u8] = match size <= INLINE_BYTES {
+                                    true => &mut inline[..size],
+                                    false => {
+                                        spill = vec![0u8; size];
+                                        &mut spill
+                                    }
+                                };
 
+                                value::encode(&self.module, target.pointee_type, &value, scratch)?;
+
+                                let bytes = Bytes::new(scratch);
                                 let address = target.address;
                                 let reason = match address::region(address) {
                                     Some(address::Region::Local) => {
@@ -676,11 +847,11 @@ impl Interpreter {
             }
 
             bitcode::Instruction::CopyMemory { target, source, size } => {
-                let destination = self.value(*target)?.as_pointer()?;
-                let origin = self.value(*source)?.as_pointer()?;
+                let destination = self.operand(*target)?.as_pointer()?;
+                let origin = self.operand(*source)?.as_pointer()?;
 
                 let count = match size {
-                    Some(size) => self.value(*size)?.as_bits()? as usize,
+                    Some(size) => self.operand(*size)?.as_bits()? as usize,
                     None => self.module.layout(origin.pointee_type)?.size,
                 };
 
@@ -715,10 +886,10 @@ impl Interpreter {
             }
 
             bitcode::Instruction::AccessChain { result, result_type, base, indices, element } => {
-                let mut pointer = self.value(*base)?.as_pointer()?;
+                let mut pointer = self.operand(*base)?.as_pointer()?;
 
                 let walked = if *element {
-                    let index = self.value(indices[0])?.as_bits()?;
+                    let index = self.operand(indices[0])?.as_bits()?;
                     let stride = self.module.layout(pointer.pointee_type)?.size as u64;
                     pointer.address = pointer.address.wrapping_add(index.wrapping_mul(stride));
                     1
@@ -729,7 +900,7 @@ impl Interpreter {
                 let mut diagnostics = detectors::DiagnosticList::new();
 
                 for index_id in &indices[walked..] {
-                    let index = self.value(*index_id)?.as_bits()? as usize;
+                    let index = self.operand(*index_id)?.as_bits()? as usize;
                     diagnostics.extend(self.element_index(pointer.pointee_type, index as u64)?);
 
                     let offset = self.module.member_offset(pointer.pointee_type, index)?;
@@ -886,12 +1057,31 @@ impl Interpreter {
                     return Err(bitcode::Error::UnsupportedExtInstSet(*set).into());
                 }
 
-                let operands = operands
-                    .iter()
-                    .map(|operand| self.value(*operand))
-                    .collect::<Result<Vec<_>, Error>>()?;
-                let computed =
-                    value::ext_inst(&self.module, *result_type, *instruction, &operands)?;
+                let computed = match operands.len() <= INLINE_OPERANDS {
+                    true => {
+                        let mut gathered: [value::Value; INLINE_OPERANDS] =
+                            std::array::from_fn(|_| value::Value::Void);
+
+                        for (slot, operand) in gathered.iter_mut().zip(operands) {
+                            *slot = self.value(*operand)?;
+                        }
+
+                        value::ext_inst(
+                            &self.module,
+                            *result_type,
+                            *instruction,
+                            &gathered[..operands.len()],
+                        )?
+                    }
+                    false => {
+                        let gathered = operands
+                            .iter()
+                            .map(|operand| self.value(*operand))
+                            .collect::<Result<Vec<_>, Error>>()?;
+
+                        value::ext_inst(&self.module, *result_type, *instruction, &gathered)?
+                    }
+                };
 
                 self.bind(*result, computed)?;
                 self.advance()?;
@@ -899,7 +1089,7 @@ impl Interpreter {
 
             bitcode::Instruction::VectorExtractDynamic { result, vector, index, .. } => {
                 let source = self.value(*vector)?;
-                let position = self.value(*index)?.as_bits()? as usize;
+                let position = self.operand(*index)?.as_bits()? as usize;
                 let extracted = match source {
                     value::Value::Composite(members) => {
                         members.get(position).cloned().ok_or(Error::OutOfBounds)?
@@ -916,7 +1106,7 @@ impl Interpreter {
             } => {
                 let source = self.value(*vector)?;
                 let inserted = self.value(*component)?;
-                let position = self.value(*index)?.as_bits()? as usize;
+                let position = self.operand(*index)?.as_bits()? as usize;
                 let updated = match source {
                     value::Value::Composite(mut members) => {
                         if position >= members.len() {
@@ -964,7 +1154,7 @@ impl Interpreter {
                 value: operand,
                 comparator,
             } => {
-                let target = self.value(*pointer)?.as_pointer()?;
+                let target = self.operand(*pointer)?.as_pointer()?;
                 let width = self.module.scalar_width(target.pointee_type)?;
                 match resume.take() {
                     Some(Resume::Scalar(previous)) => {
@@ -1016,9 +1206,15 @@ impl Interpreter {
                     return Err(Error::ArgumentMismatch);
                 }
 
-                let mut values = vec![None; self.module.bound()];
-                for (parameter, argument) in callee.parameters.iter().zip(arguments) {
-                    values[parameter.result as usize] = Some(self.value(*argument)?);
+                let slots: Vec<bitcode::Id> = callee
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.result)
+                    .collect();
+
+                let mut values = self.fixed.resolved.clone();
+                for (slot, argument) in slots.into_iter().zip(arguments) {
+                    values[slot as usize] = Some(self.value(*argument)?);
                 }
 
                 let block = self.module.function(*function)?.entry_label()?;
@@ -1031,7 +1227,10 @@ impl Interpreter {
                 );
 
                 self.advance()?;
-                self.frames.push(frame);
+
+                if let Some(caller) = self.current.replace(frame) {
+                    self.suspended.push(caller);
+                }
             }
 
             bitcode::Instruction::Branch { target } => self.jump(*target)?,
@@ -1044,7 +1243,7 @@ impl Interpreter {
             }
 
             bitcode::Instruction::Switch { selector, default_target, cases } => {
-                let selected = self.value(*selector)?.as_bits()?;
+                let selected = self.operand(*selector)?.as_bits()?;
                 let target = cases
                     .iter()
                     .find(|(literal, _)| *literal == selected)
@@ -1059,7 +1258,7 @@ impl Interpreter {
                     Some(Resume::Ack) => self.advance()?,
                     Some(_) => return Err(Error::UnexpectedResume),
                     None => {
-                        let scope = self.value(*execution_scope)?.as_bits()?;
+                        let scope = self.operand(*execution_scope)?.as_bits()?;
 
                         return self.yield_(YieldReason::ControlBarrier {
                             execution_scope: scope,
@@ -1102,10 +1301,10 @@ impl Interpreter {
 
         match address::region(address) {
             Some(address::Region::Global) | None => {
-                self.yield_(YieldReason::Write { address, bytes: bytes.to_vec() })
+                self.yield_(YieldReason::Write { address, bytes: Bytes::new(bytes) })
             }
             Some(address::Region::Local) => {
-                self.yield_(YieldReason::WriteLocal { address, bytes: bytes.to_vec() })
+                self.yield_(YieldReason::WriteLocal { address, bytes: Bytes::new(bytes) })
             }
             Some(address::Region::Constant) | Some(address::Region::Builtin) => {
                 Err(Error::ReadOnlyRegion)
@@ -1177,11 +1376,11 @@ impl Interpreter {
     }
 
     fn frame(&self) -> Result<&Frame, Error> {
-        self.frames.last().ok_or(Error::NoFrame)
+        self.current.as_ref().ok_or(Error::NoFrame)
     }
 
     fn frame_mut(&mut self) -> Result<&mut Frame, Error> {
-        self.frames.last_mut().ok_or(Error::NoFrame)
+        self.current.as_mut().ok_or(Error::NoFrame)
     }
 
     fn advance(&mut self) -> Result<(), Error> {
@@ -1204,12 +1403,13 @@ impl Interpreter {
     }
 
     fn pop_frame(&mut self, returned: value::Value) -> Result<(), Error> {
-        let finished = self.frames.pop().ok_or(Error::NoFrame)?;
+        let finished = self.current.take().ok_or(Error::NoFrame)?;
 
+        self.current = self.suspended.pop();
         self.storage.truncate(finished.storage_watermark);
 
         if let Some(slot) = finished.return_slot
-            && let Some(parent) = self.frames.last_mut()
+            && let Some(parent) = self.current.as_mut()
         {
             parent.values[slot as usize] = Some(returned);
         }
@@ -1227,42 +1427,31 @@ impl Interpreter {
             return Ok(found);
         }
 
-        match value::constant(&self.module, id) {
-            Ok(value) => return Ok(value),
-            Err(value::Error::Bitcode(bitcode::Error::NotAConstant(_))) => (),
-            Err(error) => return Err(error.into()),
-        }
+        self.resolve(id)
+    }
 
-        if let Some(variable) = self.module.variable(id)? {
-            let pointee_type = self.module.pointee_type(variable.result_type)?;
+    fn operand(&self, id: bitcode::Id) -> Result<&value::Value, Error> {
+        let slot = id as usize;
 
-            if let Some(builtin) = self.module.decorations(id)?.builtin {
-                return Ok(value::Value::Pointer(value::Pointer {
-                    address: builtin_to_addr(builtin),
-                    pointee_type,
-                }));
-            }
+        self.current
+            .as_ref()
+            .and_then(|frame| frame.values.get(slot))
+            .and_then(Option::as_ref)
+            .ok_or(Error::UnboundValue(id))
+    }
 
-            let address = match variable.storage {
-                bitcode::StorageClass::UniformConstant | bitcode::StorageClass::Private => {
-                    address_of(&self.private_addresses, id)?
-                }
-                bitcode::StorageClass::Workgroup => address_of(&self.local_addresses, id)?,
-                storage => return Err(value::Error::UnsupportedStorageClass(storage).into()),
-            };
-
-            return Ok(value::Value::Pointer(value::Pointer {
-                address,
-                pointee_type,
-            }));
-        }
-
-        Err(Error::UnboundValue(id))
+    fn resolve(&self, id: bitcode::Id) -> Result<value::Value, Error> {
+        resolve(
+            &self.module,
+            &self.fixed.private_addresses,
+            &self.local_addresses,
+            id,
+        )
     }
 
     fn optional_bits(&self, id: Option<bitcode::Id>) -> Result<u64, Error> {
         match id {
-            Some(id) => Ok(self.value(id)?.as_bits()?),
+            Some(id) => Ok(self.operand(id)?.as_bits()?),
             None => Ok(0),
         }
     }
